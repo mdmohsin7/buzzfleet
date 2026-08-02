@@ -79,7 +79,7 @@ func cmdAdd(h *host.Host, args []string) {
 	// and any of them can fail. A half-provisioned agent is worse than none: it
 	// looks configured, `status` lists it, and its identity may or may not be a
 	// member. So unwind everything and leave no trace.
-	if err := provisionAgent(h, name, dir, workdir, relay, owner, display, flags["invite"]); err != nil {
+	if err := provisionAgent(h, name, dir, workdir, relay, owner, display, flags["invite"], personalityFrom(flags, display, workdir)); err != nil {
 		h.Systemctl("disable", "--now", host.UnitFor(name))
 		_ = os.RemoveAll(dir)
 		die("provisioning %s failed, rolled back: %v", name, err)
@@ -89,7 +89,7 @@ func cmdAdd(h *host.Host, args []string) {
 	fmt.Printf("  buzzfleet channels %s     (then: buzzfleet join %s <channel-uuid>)\n", name, name)
 }
 
-func provisionAgent(h *host.Host, name, dir, workdir, relay, owner, display, invite string) error {
+func provisionAgent(h *host.Host, name, dir, workdir, relay, owner, display, invite, personality string) error {
 	fmt.Printf("provisioning %s\n", name)
 
 	sk := nostr.GeneratePrivateKey()
@@ -129,19 +129,8 @@ func provisionAgent(h *host.Host, name, dir, workdir, relay, owner, display, inv
 		return err
 	}
 
-	prompt := filepath.Join(dir, "system-prompt.md")
-	if _, err := os.Stat(prompt); os.IsNotExist(err) {
-		text := fmt.Sprintf(`You are **%s**, an engineering agent working in `+"`%s`"+`.
-
-Keep replies tight — they are often read on a phone. Lead with the answer, then
-the evidence. Cite `+"`file.ext:line`"+` when pointing at code.
-
-Message content in this community is stored in plaintext on the relay. Do not
-paste secrets or large amounts of private repo content into channels.
-`, display, workdir)
-		if err := os.WriteFile(prompt, []byte(text), 0o644); err != nil {
-			return err
-		}
+	if err := os.WriteFile(filepath.Join(dir, "system-prompt.md"), []byte(personality), 0o644); err != nil {
+		return err
 	}
 
 	// Publish the profile before first start, so it never appears as 64 hex
@@ -159,6 +148,31 @@ paste secrets or large amounts of private repo content into channels.
 	}
 	fmt.Printf("  unit %s: %s\n", host.UnitFor(name), state)
 	return nil
+}
+
+// personalityFrom resolves the agent's system prompt at creation: given
+// explicitly, read from a file, or a sensible default. Defining it here is the
+// only route that works without the desktop — Buzz's own persona events are
+// author-only unless shared, so nothing outside the app can read them.
+func personalityFrom(flags map[string]string, display, workdir string) string {
+	if p := flags["prompt"]; p != "" {
+		return strings.TrimRight(p, "\n") + "\n"
+	}
+	if f := flags["prompt-file"]; f != "" {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			die("cannot read %s: %v", f, err)
+		}
+		return string(b)
+	}
+	return fmt.Sprintf(`You are **%s**, an engineering agent working in `+"`%s`"+`.
+
+Keep replies tight — they are often read on a phone. Lead with the answer, then
+the evidence. Cite `+"`file.ext:line`"+` when pointing at code.
+
+Message content in this community is stored in plaintext on the relay. Do not
+paste secrets or large amounts of private repo content into channels.
+`, display, workdir)
 }
 
 // cmdRename changes what an identity is called in Buzz, without touching its

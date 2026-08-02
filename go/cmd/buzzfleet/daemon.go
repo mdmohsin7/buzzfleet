@@ -275,6 +275,27 @@ func handleCommand(h *host.Host, cfg *fleet.Config, text string) string {
 		return hostPrefix + block(strings.Join(lines, "\n"))
 	case "doctor":
 		return hostPrefix + block(capture(func() { cmdDoctor(h) }))
+	case "prompt":
+		// Setting a personality from a phone is the whole point: Buzz's own
+		// persona events cannot be read by anything but their author, so chat
+		// is the only route that works away from the desktop.
+		if arg == "" {
+			return "usage: `prompt <agent>` to show, or `prompt <agent> <text...>` to set"
+		}
+		if len(args) == 1 {
+			p := readPrompt(h, arg)
+			if p == "" {
+				return fmt.Sprintf("`%s` has no personality set.", arg)
+			}
+			return hostPrefix + block(p)
+		}
+		// Everything after the agent name, with the original line breaks kept.
+		body := strings.TrimSpace(text[strings.Index(text, arg)+len(arg):])
+		if err := writePrompt(h, arg, body); err != nil {
+			return fmt.Sprintf("could not set personality: `%v`", err)
+		}
+		out := capture(func() { restartFor(h, arg) })
+		return fmt.Sprintf("**%s** — personality of **%s** updated and applied.\n%s", cfg.Host, arg, block(out))
 	case "help", "":
 		return helpText(cfg)
 	default:

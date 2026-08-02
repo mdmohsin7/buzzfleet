@@ -29,7 +29,10 @@ const usage = `buzzfleet — run and supervise Buzz agents on this machine
   doctor                        duplicates, permissions, membership
   reap [--dry-run]              kill harnesses systemd is not supervising
   add <name> --workdir <path> --invite <code> [--display-name "..."]
+       [--prompt "..." | --prompt-file <path>]
                                 provision a new agent end to end
+  prompt <agent> [--set "..." | --file <path> | --edit]
+                                show or change an agent's personality
   rename <agent|supervisor> "<display name>"
                                 change what it is called in Buzz
   channels <agent>              channels that agent can see
@@ -106,6 +109,8 @@ func main() {
 		cmdRunAgent(h, args)
 	case "add":
 		cmdAdd(h, args)
+	case "prompt":
+		cmdPrompt(h, args)
 	case "rename":
 		cmdRename(h, args)
 	case "init":

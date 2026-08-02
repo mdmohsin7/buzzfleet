@@ -60,7 +60,8 @@ introduces itself in the channel with its command list.
 Add an agent:
 
 ```bash
-buzzfleet add scout --workdir /srv/scratch --invite v2.... --display-name "Scout"
+buzzfleet add scout --workdir /srv/scratch --invite v2.... \
+  --display-name "Scout" --prompt "You research things and report back briefly."
 buzzfleet channels scout
 buzzfleet join scout <channel-uuid>
 ```
@@ -75,6 +76,7 @@ health              is each agent actually reachable on the relay
 restart <agent>
 start | stop <agent>
 logs <agent> [n]
+prompt <agent> [text]   show or set its personality
 doctor              duplicates, permissions, membership
 ```
 
@@ -82,6 +84,16 @@ Only the owner is obeyed. Short replies land inline; long ones are threaded.
 
 Each host answers to its own name and to a shared `@fleet`, so one message
 reaches every machine and each reply is labelled with its hostname.
+
+An agent's personality is its system prompt, set at creation with `--prompt` or
+`--prompt-file` and changed later from either surface:
+
+```bash
+buzzfleet prompt scout --edit          # or --set "..." / --file prompt.md
+```
+
+It is a plain file at `agents/<name>/system-prompt.md`; the agent restarts to
+pick it up.
 
 From the shell, the same operations plus `add`, `rename`, `reap`, `join`,
 `channels`, `install` and `init`. Run `buzzfleet` for the full list.

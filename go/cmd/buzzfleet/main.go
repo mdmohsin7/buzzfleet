@@ -1,0 +1,440 @@
+// buzzfleet — run and supervise Buzz agents on your own servers.
+//
+// One static binary. `buzzfleet daemon` is the supervisor that joins your
+// community and answers in a channel, which is what makes fleet control work
+// from mobile, desktop and web without any client UI; the rest are the local
+// commands it drives.
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+
+	"github.com/mdmohsin7/buzzfleet/internal/fleet"
+	"github.com/mdmohsin7/buzzfleet/internal/host"
+	"github.com/nbd-wtf/go-nostr"
+	"github.com/nbd-wtf/go-nostr/nip19"
+)
+
+const usage = `buzzfleet — run and supervise Buzz agents on this machine
+
+  status [name...]              agents: unit state, uptime, relay health
+  health                        is each agent actually present on the relay
+  start|stop|restart <agent>    lifecycle (systemd; restart cannot orphan)
+  logs <agent> [-n N]           recent journal output
+  doctor                        duplicates, permissions, membership
+  reap [--dry-run]              kill harnesses systemd is not supervising
+  add <name> --workdir <path> --invite <code> [--display-name "..."]
+                                provision a new agent end to end
+  rename <agent|supervisor> "<display name>"
+                                change what it is called in Buzz
+  channels <agent>              channels that agent can see
+  join <agent> <channel-uuid>   join one
+  install [--force]             write the systemd units and check this host
+  init [--invite <code>]        set up the chat supervisor
+  daemon                        run the supervisor (normally via systemd)
+  run-agent <name>              launch one harness (called by systemd)
+`
+
+// Set by the release build via -ldflags.
+var version = "dev"
+
+func die(format string, a ...any) {
+	fmt.Fprintf(os.Stderr, "buzzfleet: "+format+"\n", a...)
+	os.Exit(1)
+}
+
+func fleetHome() string {
+	if v := os.Getenv("FLEET_HOME"); v != "" {
+		return v
+	}
+	exe, err := os.Executable()
+	if err == nil {
+		if abs, err := filepath.Abs(filepath.Join(filepath.Dir(exe), "..")); err == nil {
+			if _, err := os.Stat(filepath.Join(abs, "agents")); err == nil {
+				return abs
+			}
+		}
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "buzzfleet")
+}
+
+func derivePubkey(secret string) (string, error) {
+	if strings.HasPrefix(secret, "nsec") {
+		_, data, err := nip19.Decode(secret)
+		if err != nil {
+			return "", err
+		}
+		secret = data.(string)
+	}
+	return nostr.GetPublicKey(secret)
+}
+
+func main() {
+	if len(os.Args) < 2 {
+		fmt.Print(usage)
+		return
+	}
+	h := host.New(fleetHome())
+	cmd, args := os.Args[1], os.Args[2:]
+
+	switch cmd {
+	case "status", "ls":
+		cmdStatus(h, args)
+	case "health":
+		fmt.Println(healthText(h, mustConfig(h)))
+	case "start", "stop", "restart":
+		cmdLifecycle(h, cmd, args)
+	case "logs":
+		cmdLogs(h, args)
+	case "doctor":
+		cmdDoctor(h)
+	case "reap":
+		cmdReap(h, args)
+	case "channels":
+		cmdChannels(h, args)
+	case "join":
+		cmdJoin(h, args)
+	case "install":
+		cmdInstall(h, args)
+	case "run-agent":
+		cmdRunAgent(h, args)
+	case "add":
+		cmdAdd(h, args)
+	case "rename":
+		cmdRename(h, args)
+	case "init":
+		cmdInit(h, args)
+	case "daemon":
+		runDaemon(h, mustConfig(h))
+	case "version", "--version":
+		fmt.Println(version)
+	case "help", "-h", "--help":
+		fmt.Print(usage)
+	default:
+		fmt.Print(usage)
+		os.Exit(1)
+	}
+}
+
+// ── config ────────────────────────────────────────────────────────────────────
+
+func configPath(h *host.Host) string {
+	if v := os.Getenv("BUZZFLEETD_CONFIG"); v != "" {
+		return v
+	}
+	return filepath.Join(h.FleetHome, "fleetd.json")
+}
+
+func loadConfig(h *host.Host) (*fleet.Config, error) {
+	b, err := os.ReadFile(configPath(h))
+	if err != nil {
+		return nil, err
+	}
+	var c fleet.Config
+	if err := json.Unmarshal(b, &c); err != nil {
+		return nil, err
+	}
+	return c.WithDefaults(), nil
+}
+
+func mustConfig(h *host.Host) *fleet.Config {
+	c, err := loadConfig(h)
+	if err != nil {
+		die("no supervisor config at %s — run `buzzfleet init` first", configPath(h))
+	}
+	return c
+}
+
+// ── status and health ─────────────────────────────────────────────────────────
+
+func cmdStatus(h *host.Host, args []string) {
+	names := args
+	if len(names) == 0 {
+		names = h.Agents()
+	}
+	if len(names) == 0 {
+		fmt.Println("no agents configured")
+		return
+	}
+	fmt.Printf("%-12s%-10s%-6s%-9s%-7s%s\n", "AGENT", "STATE", "BOOT", "PID", "UP", "WORKDIR")
+	for _, n := range names {
+		c, err := h.AgentConfig(n)
+		if err != nil {
+			die("%v", err)
+		}
+		state := h.UnitState(n)
+		pid := h.MainPID(n)
+		if pid == "" {
+			pid = "-"
+		}
+		up := "-"
+		if state == "active" {
+			up = h.Uptime(n)
+		}
+		boot := "no"
+		if h.UnitEnabled(n) {
+			boot = "yes"
+		}
+		fmt.Printf("%-12s%-10s%-6s%-9s%-7s%s\n", n, state, boot, pid, up, c.Workdir)
+	}
+}
+
+// assessAll gathers one reading per agent, with a single relay call for the lot.
+func assessAll(h *host.Host, cfg *fleet.Config) []fleet.Assessment {
+	names := h.Agents()
+	pubkeys := map[string]string{}
+	var list []string
+	for _, n := range names {
+		if pk := h.AgentPubkey(n, derivePubkey); pk != "" {
+			pubkeys[n] = pk
+			list = append(list, pk)
+		}
+	}
+	online, err := h.PresenceOf(cfg.PrivateKey, cfg.Relay, list)
+
+	out := make([]fleet.Assessment, 0, len(names))
+	for _, n := range names {
+		unit := h.UnitState(n)
+		pk, hasID := pubkeys[n]
+
+		present := fleet.TriUnknown
+		if err == nil && hasID {
+			if online[pk] {
+				present = fleet.TriYes
+			} else {
+				present = fleet.TriNo
+			}
+		}
+		child := fleet.TriUnknown
+		if unit == "active" && present == fleet.TriYes {
+			if alive, known := h.ChildAlive(n); known {
+				if alive {
+					child = fleet.TriYes
+				} else {
+					child = fleet.TriNo
+				}
+			}
+		}
+		out = append(out, fleet.Assess(n, unit, present, child, hasID))
+	}
+	return out
+}
+
+func healthText(h *host.Host, cfg *fleet.Config) string {
+	rows := assessAll(h, cfg)
+	if len(rows) == 0 {
+		return "no agents configured"
+	}
+	var b strings.Builder
+	for _, r := range rows {
+		fmt.Fprintf(&b, "%-12s%-9s%s\n", r.Name, r.State, r.Detail)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// ── lifecycle ─────────────────────────────────────────────────────────────────
+
+func cmdLifecycle(h *host.Host, verb string, args []string) {
+	if len(args) == 0 {
+		die("usage: buzzfleet %s <agent>", verb)
+	}
+	name := args[0]
+	if _, err := h.AgentConfig(name); err != nil {
+		die("%v", err)
+	}
+	h.Systemctl(verb, host.UnitFor(name))
+	state := h.UnitState(name)
+
+	if verb != "restart" {
+		fmt.Printf("%s: %s\n", name, state)
+		return
+	}
+	// systemd tears down the whole control group, so a restart cannot leave the
+	// old harness alive — but verify rather than trust, because assuming a kill
+	// worked is exactly what produced duplicate replies by hand.
+	var strays []string
+	for _, p := range h.Harnesses() {
+		if p.Agent == name && !p.Supervised {
+			strays = append(strays, p.PID)
+		}
+	}
+	if len(strays) > 0 {
+		fmt.Printf("%s: %s, but %d unsupervised harness(es) remain (%s) — run `buzzfleet doctor`\n",
+			name, state, len(strays), strings.Join(strays, ", "))
+		return
+	}
+	fmt.Printf("%s: %s, single harness confirmed\n", name, state)
+}
+
+func cmdLogs(h *host.Host, args []string) {
+	if len(args) == 0 {
+		die("usage: buzzfleet logs <agent> [-n N]")
+	}
+	n := "40"
+	for i, a := range args {
+		if a == "-n" && i+1 < len(args) {
+			n = args[i+1]
+		}
+	}
+	fmt.Println(h.Journal(args[0], n))
+}
+
+// ── doctor and reap ───────────────────────────────────────────────────────────
+
+func cmdDoctor(h *host.Host) {
+	problems := 0
+	say := func(ok bool, msg string) {
+		tag := "ok  "
+		if !ok {
+			tag = "FAIL"
+			problems++
+		}
+		fmt.Printf("%s %s\n", tag, msg)
+	}
+
+	byAgent := map[string][]host.Proc{}
+	procs := h.Harnesses()
+	for _, p := range procs {
+		byAgent[p.Agent] = append(byAgent[p.Agent], p)
+	}
+	clean := true
+	for agent, list := range byAgent {
+		if len(list) > 1 {
+			clean = false
+			say(false, fmt.Sprintf("%s: %d harnesses running — every mention will be answered %dx", agent, len(list), len(list)))
+		}
+		var loose []string
+		for _, p := range list {
+			if !p.Supervised {
+				loose = append(loose, p.PID)
+			}
+		}
+		if len(loose) > 0 {
+			clean = false
+			say(false, fmt.Sprintf("%s: %d harness(es) not under systemd (%s) — a restart will not stop them",
+				agent, len(loose), strings.Join(loose, ", ")))
+		}
+	}
+	if clean {
+		say(true, fmt.Sprintf("%d harness process(es), all supervised, none duplicated", len(procs)))
+	}
+
+	_, cfgErr := loadConfig(h)
+	seen := map[string][]string{}
+	for _, n := range h.Agents() {
+		c, err := h.AgentConfig(n)
+		if err != nil {
+			say(false, fmt.Sprintf("%s: %v", n, err))
+			continue
+		}
+		_, statErr := os.Stat(c.Workdir)
+		say(statErr == nil, fmt.Sprintf("%s: workdir %s", n, c.Workdir))
+
+		mode := h.IdentityMode(n)
+		if mode == "" {
+			say(false, n+": identity.env missing")
+		} else {
+			say(mode == "600", fmt.Sprintf("%s: identity.env mode %s%s", n, mode,
+				map[bool]string{true: "", false: " (should be 600 — it holds the private key)"}[mode == "600"]))
+		}
+		say(h.UnitEnabled(n), fmt.Sprintf("%s: %s", n,
+			map[bool]string{true: "starts on boot", false: "NOT enabled — will not come back after a reboot"}[h.UnitEnabled(n)]))
+
+		if pk := h.AgentPubkey(n, derivePubkey); pk != "" {
+			seen[pk] = append(seen[pk], n)
+		}
+		if cfgErr == nil {
+			if chans, err := h.Channels(h.AgentSecret(n), c.Relay); err != nil {
+				say(false, fmt.Sprintf("%s: cannot reach relay as this identity (%v)", n, err))
+			} else {
+				say(len(chans) > 0, fmt.Sprintf("%s: member of %d channel(s)%s", n, len(chans),
+					map[bool]string{true: "", false: " — it will sit idle until it joins one"}[len(chans) > 0]))
+			}
+		}
+	}
+	// Two agents on one key both answer every mention, exactly like two
+	// harnesses on one key.
+	for pk, names := range seen {
+		if len(names) > 1 {
+			say(false, fmt.Sprintf("agents %s share pubkey %s… — they will both answer every mention",
+				strings.Join(names, ", "), pk[:12]))
+		}
+	}
+
+	if problems == 0 {
+		fmt.Println("\nno problems found")
+		return
+	}
+	fmt.Printf("\n%d problem(s)\n", problems)
+	os.Exit(1)
+}
+
+func cmdReap(h *host.Host, args []string) {
+	dry := len(args) > 0 && args[0] == "--dry-run"
+	var loose []host.Proc
+	for _, p := range h.Harnesses() {
+		if !p.Supervised {
+			loose = append(loose, p)
+		}
+	}
+	if len(loose) == 0 {
+		fmt.Println("no unsupervised harnesses")
+		return
+	}
+	for _, p := range loose {
+		if dry {
+			fmt.Printf("would kill %s (%s)\n", p.PID, p.Agent)
+			continue
+		}
+		pid, err := strconv.Atoi(p.PID)
+		if err != nil {
+			continue
+		}
+		proc, err := os.FindProcess(pid)
+		if err != nil {
+			continue
+		}
+		_ = proc.Signal(os.Interrupt)
+		fmt.Printf("killed %s (%s)\n", p.PID, p.Agent)
+	}
+}
+
+// ── channels ──────────────────────────────────────────────────────────────────
+
+func cmdChannels(h *host.Host, args []string) {
+	if len(args) == 0 {
+		die("usage: buzzfleet channels <agent>")
+	}
+	c, err := h.AgentConfig(args[0])
+	if err != nil {
+		die("%v", err)
+	}
+	chans, err := h.Channels(h.AgentSecret(args[0]), c.Relay)
+	if err != nil {
+		die("%v", err)
+	}
+	for _, ch := range chans {
+		fmt.Printf("%s  %s  %s\n", ch.ID, ch.Name, ch.Description)
+	}
+}
+
+func cmdJoin(h *host.Host, args []string) {
+	if len(args) < 2 {
+		die("usage: buzzfleet join <agent> <channel-uuid>")
+	}
+	c, err := h.AgentConfig(args[0])
+	if err != nil {
+		die("%v", err)
+	}
+	out, err := h.Buzz(h.AgentSecret(args[0]), c.Relay, "channels", "join", "--channel", args[1])
+	if err != nil {
+		die("join failed: %v", err)
+	}
+	fmt.Printf("%s joined %s\n%s\n", args[0], args[1], out)
+}

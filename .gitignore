@@ -1,0 +1,16 @@
+# Agent identities. Each identity.env holds a Nostr private key.
+agents/
+
+# Supervisor config — holds the supervisor's private key.
+fleetd.json
+
+# Command cursor and heal history.
+.fleetd-state.json
+
+# The block/buzz checkout that supplies the buzz CLI.
+buzz/
+
+# Build output.
+bin/buzzfleet
+dist/
+*.log

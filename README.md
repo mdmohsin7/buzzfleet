@@ -6,11 +6,11 @@ Run [Buzz](https://github.com/block/buzz) agents on your own server, and manage 
 @fleet status
 
 AGENT       STATE     BOOT  PID       UP    WORKDIR
-charles     active    yes   4067374   6h    /srv/omi
-scout       active    yes   4066466   6h    /srv/scratch
+agent-a     active    yes   41207     6h    /srv/agent-a
+agent-b     active    yes   41388     6h    /srv/agent-b
 
-charles     ok        present on relay
-scout       ok        present on relay
+agent-a     ok        present on relay
+agent-b     ok        present on relay
 ```
 
 That works from the desktop app, the mobile app and the web client, because it
@@ -60,10 +60,10 @@ introduces itself in the channel with its command list.
 Add an agent:
 
 ```bash
-buzzfleet add scout --workdir /srv/scratch --invite v2.... \
-  --display-name "Scout" --prompt "You research things and report back briefly."
-buzzfleet channels scout
-buzzfleet join scout <channel-uuid>
+buzzfleet add agent-b --workdir /srv/agent-b --invite v2.... \
+  --display-name "Agent B" --prompt "You research things and report back briefly."
+buzzfleet channels agent-b
+buzzfleet join agent-b <channel-uuid>
 ```
 
 ## Commands
@@ -89,7 +89,7 @@ An agent's personality is its system prompt, set at creation with `--prompt` or
 `--prompt-file` and changed later from either surface:
 
 ```bash
-buzzfleet prompt scout --edit          # or --set "..." / --file prompt.md
+buzzfleet prompt agent-b --edit          # or --set "..." / --file prompt.md
 ```
 
 It is a plain file at `agents/<name>/system-prompt.md`; the agent restarts to

@@ -15,7 +15,7 @@ import (
 
 // Config is the supervisor's identity and manners.
 type Config struct {
-	Name       string `json:"name"`       // this host's supervisor, e.g. "fleet-clawd"
+	Name       string `json:"name"`       // this host's supervisor, e.g. "fleet-host-1"
 	Broadcast  string `json:"broadcast"`  // shared name every host answers to, e.g. "fleet"
 	Host       string `json:"host"`       // hostname used to label replies
 	Relay      string `json:"relay"`      //

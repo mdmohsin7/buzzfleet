@@ -87,9 +87,13 @@ func (p *DockerProxy) handler() http.Handler {
 			r.Body.Close()
 			out, changes, err := fleet.ClampContainer(kind, body, p.Limits, p.Agent, time.Now().Unix())
 			if err != nil {
-				// Let Docker produce its own error for a malformed request.
-				out = body
-			} else if len(changes) > 0 {
+				// Refused rather than passed on: proving that dockerd can never
+				// read a body this code could not is harder than saying no.
+				p.Logf("docker proxy %s: refused container %s: %v", p.Agent, kind, err)
+				http.Error(w, "buzzfleet docker proxy: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			if len(changes) > 0 {
 				p.Logf("docker proxy %s: container %s: %s", p.Agent, kind, strings.Join(changes, ", "))
 			}
 			r.Body = io.NopCloser(bytes.NewReader(out))

@@ -46,10 +46,10 @@ func TestSizeLimitsOverrides(t *testing.T) {
 
 func TestPlanLimitsUsesUserSliceWhenDelegated(t *testing.T) {
 	tg := PlanLimits(CgroupUnified, []string{"cpu", "memory", "pids"}, 1000, SizeLimits(2, 12000, LimitsConfig{}))
-	if tg.System || tg.Unit != "buzz-agent.slice" {
+	if tg.System || tg.Unit != AgentSlice {
 		t.Fatalf("delegated v2 needs no root: %+v", tg)
 	}
-	if got := tg.String(); got != "systemctl --user set-property buzz-agent.slice CPUQuota=150% MemoryHigh=9476M MemoryMax=10500M" {
+	if got := tg.String(); got != "systemctl --user set-property buzzfleet.slice CPUQuota=150% MemoryHigh=9476M MemoryMax=10500M" {
 		t.Fatalf("command: %s", got)
 	}
 }
@@ -84,14 +84,14 @@ func TestPlanLimitsV2WithoutCPUFallsBackToSystem(t *testing.T) {
 
 func TestTightestFindsTheBindingAncestor(t *testing.T) {
 	c := Tightest([]CgroupReading{
-		{Path: "/user.slice/user-1000.slice/user@1000.service/buzz-agent.slice/buzz-agent@agent-a.service", CPUMax: "max 100000", MemoryMax: "max"},
-		{Path: "/user.slice/user-1000.slice/user@1000.service/buzz-agent.slice", CPUMax: "150000 100000", MemoryMax: "11010048000"},
+		{Path: "/user.slice/user-1000.slice/user@1000.service/buzzfleet.slice/buzz-agent@agent-a.service", CPUMax: "max 100000", MemoryMax: "max"},
+		{Path: "/user.slice/user-1000.slice/user@1000.service/buzzfleet.slice", CPUMax: "150000 100000", MemoryMax: "11010048000"},
 		{Path: "/user.slice", CPUMax: "max 100000", MemoryMax: "max"},
 	})
-	if c.CPUPercent != 150 || c.MemoryMB != 10500 || !strings.HasSuffix(c.CPUAt, "buzz-agent.slice") {
+	if c.CPUPercent != 150 || c.MemoryMB != 10500 || !strings.HasSuffix(c.CPUAt, "buzzfleet.slice") {
 		t.Fatalf("got %+v", c)
 	}
-	if got := c.String(); got != "CPU 150% (on buzz-agent.slice), memory 10500M (on buzz-agent.slice)" {
+	if got := c.String(); got != "CPU 150% (on buzzfleet.slice), memory 10500M (on buzzfleet.slice)" {
 		t.Fatalf("got %q", got)
 	}
 }
@@ -107,5 +107,31 @@ func TestTightestV1UnlimitedIsNoCeiling(t *testing.T) {
 	}
 	if got := c.String(); got != "CPU: NO ceiling, memory: NO ceiling" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestSmallHostIsNotLeftReclaiming(t *testing.T) {
+	l := SizeLimits(1, 2048, LimitsConfig{})
+	if l.MemoryMaxMB != 1024 || l.MemoryHighMB != 768 {
+		t.Fatalf("throttle at 3/4 of the ceiling on a small host, got high=%d max=%d", l.MemoryHighMB, l.MemoryMaxMB)
+	}
+}
+
+func TestPlanLimitsNeedsBothControllers(t *testing.T) {
+	// cpu alone is not enough: the memory ceiling would be accepted and ignored.
+	tg := PlanLimits(CgroupUnified, []string{"cpu", "pids"}, 1000, SizeLimits(2, 12000, LimitsConfig{}))
+	if !tg.System {
+		t.Fatalf("without memory delegated the ceiling must go on the user manager: %+v", tg)
+	}
+}
+
+func TestTightestPicksTheLowestMemory(t *testing.T) {
+	c := Tightest([]CgroupReading{
+		{Path: "/a/b/c", MemoryMax: "4294967296"}, // 4096M
+		{Path: "/a/b", MemoryMax: "2147483648"},   // 2048M: this one binds
+		{Path: "/a", MemoryMax: "8589934592"},
+	})
+	if c.MemoryMB != 2048 || c.MemoryAt != "/a/b" {
+		t.Fatalf("got %+v", c)
 	}
 }

@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -114,6 +115,78 @@ func TestRewriteKind(t *testing.T) {
 		m, p, _ := strings.Cut(in, " ")
 		if got := RewriteKind(m, p); got != want {
 			t.Fatalf("%s: got %q want %q", in, got, want)
+		}
+	}
+}
+
+func TestClampLowercaseFieldsCannotSlipPast(t *testing.T) {
+	// dockerd matches JSON keys case-insensitively, so these are real caps.
+	for _, body := range []string{
+		`{"HostConfig":{"memory":4294967296,"nanoCpus":4000000000}}`,
+		`{"hostConfig":{"Memory":4294967296,"NanoCpus":4e9}}`,
+		`{"hostconfig":{"MEMORY":4294967296}}`,
+	} {
+		out, _, err := ClampContainer("create", []byte(body), testCaps, "agent-a", 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := string(out)
+		if strings.Contains(strings.ToLower(s), "4294967296") || strings.Contains(s, "4000000000") || strings.Contains(s, "4e9") {
+			t.Fatalf("%s: uncapped value survived: %s", body, s)
+		}
+		var doc map[string]any
+		_ = json.Unmarshal(out, &doc)
+		hc, ok := doc["HostConfig"].(map[string]any)
+		if !ok || len(doc) != 2 || hc["Memory"].(float64) != 3072<<20 || hc["NanoCpus"].(float64) != 1e9 {
+			t.Fatalf("%s: want one canonical, capped HostConfig: %s", body, s)
+		}
+	}
+}
+
+func TestClampLowercaseLabelsCannotSpoofTheAgent(t *testing.T) {
+	out, _, err := ClampContainer("create", []byte(`{"labels":{"buzzfleet.agent":"someone-else","keep":"me"}}`), testCaps, "agent-a", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	_ = json.Unmarshal(out, &doc)
+	if _, stray := doc["labels"]; stray {
+		t.Fatalf("the lowercase key must be folded in: %s", out)
+	}
+	labels := doc["Labels"].(map[string]any)
+	if labels[LabelAgent] != "agent-a" || labels["keep"] != "me" {
+		t.Fatalf("labels: %v", labels)
+	}
+}
+
+func TestClampRefusesTwoSpellingsOfOneField(t *testing.T) {
+	for _, body := range []string{
+		`{"HostConfig":{"Memory":1},"hostConfig":{"Memory":4294967296}}`,
+		`{"HostConfig":{"Memory":1,"memory":4294967296}}`,
+		`{"Labels":{},"labels":{"buzzfleet.agent":"x"}}`,
+	} {
+		if _, _, err := ClampContainer("create", []byte(body), testCaps, "agent-a", 1); !errors.Is(err, ErrAmbiguous) {
+			t.Fatalf("%s: want ErrAmbiguous, got %v", body, err)
+		}
+	}
+}
+
+func TestClampPeriodWithoutQuota(t *testing.T) {
+	// dockerd refuses NanoCpus next to CpuPeriod; the cap has to be a quota.
+	doc, _ := clamp(t, "create", `{"HostConfig":{"CpuPeriod":50000}}`)
+	hc := hostConfig(doc)
+	if hc["CpuQuota"].(float64) != 50000 {
+		t.Fatalf("quota: %v", hc)
+	}
+	if _, set := hc["NanoCpus"]; set {
+		t.Fatal("NanoCpus must not be added next to CpuPeriod")
+	}
+}
+
+func TestClampRefusesMalformedBodies(t *testing.T) {
+	for _, body := range []string{`{not json`, `[1,2]`, `"x"`} {
+		if _, _, err := ClampContainer("create", []byte(body), testCaps, "agent-a", 1); err == nil {
+			t.Fatalf("%s: must be refused, not passed through", body)
 		}
 	}
 }

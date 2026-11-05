@@ -16,12 +16,16 @@ const cgroupRoot = "/sys/fs/cgroup"
 
 // CgroupMode reports how control groups are mounted, and which controllers the
 // user manager may use. On v1 nothing can be delegated, so the list is empty.
+//
+// cgroup.controllers, not subtree_control: it lists what the user manager has
+// been given, whereas subtree_control only shows what systemd has switched on
+// below it so far, which it does lazily.
 func CgroupMode() (fleet.CgroupMode, []string) {
 	var st syscall.Statfs_t
 	if err := syscall.Statfs(cgroupRoot, &st); err == nil && st.Type == 0x63677270 { // CGROUP2_SUPER_MAGIC
 		uid := os.Getuid()
 		b, _ := os.ReadFile(filepath.Join(cgroupRoot, "user.slice",
-			"user-"+strconv.Itoa(uid)+".slice", "user@"+strconv.Itoa(uid)+".service", "cgroup.subtree_control"))
+			"user-"+strconv.Itoa(uid)+".slice", "user@"+strconv.Itoa(uid)+".service", "cgroup.controllers"))
 		return fleet.CgroupUnified, strings.Fields(string(b))
 	}
 	if _, err := os.Stat(filepath.Join(cgroupRoot, "unified")); err == nil {

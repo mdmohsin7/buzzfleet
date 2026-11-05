@@ -53,7 +53,7 @@ func SizeLimits(nproc, ramMB int, o LimitsConfig) Limits {
 	}
 	reserve := max(1024, ramMB/8)
 	l.MemoryMaxMB = max(256, ramMB-reserve)
-	l.MemoryHighMB = max(256, l.MemoryMaxMB-1024)
+	l.MemoryHighMB = throttlePoint(l.MemoryMaxMB)
 
 	if o.CPUPercent > 0 {
 		l.CPUPercent = o.CPUPercent
@@ -61,7 +61,7 @@ func SizeLimits(nproc, ramMB int, o LimitsConfig) Limits {
 	if o.MemoryMaxMB > 0 {
 		l.MemoryMaxMB = o.MemoryMaxMB
 		if o.MemoryHighMB == 0 {
-			l.MemoryHighMB = max(256, o.MemoryMaxMB-1024)
+			l.MemoryHighMB = throttlePoint(o.MemoryMaxMB)
 		}
 	}
 	if o.MemoryHighMB > 0 {
@@ -77,6 +77,20 @@ func SizeLimits(nproc, ramMB int, o LimitsConfig) Limits {
 		l.DockerMemoryMB = o.DockerMemoryMB
 	}
 	return l
+}
+
+// AgentSlice is the slice every agent unit is placed in. It is named in the
+// unit template, not left to systemd: a template instance otherwise lands in a
+// slice systemd derives from the unit's name, which differs between versions
+// (app-buzz\x2dagent.slice on recent ones), and a ceiling on any other slice
+// caps nothing. It has no dash, because a dash in a slice name means nesting.
+const AgentSlice = "buzzfleet.slice"
+
+// throttlePoint is where the kernel starts reclaiming: a GiB below the hard
+// ceiling, but never below three quarters of it, so a small host is not left
+// reclaiming constantly.
+func throttlePoint(maxMB int) int {
+	return max(256, maxMB*3/4, maxMB-1024)
 }
 
 // CgroupMode is how the host's control groups are mounted.
@@ -117,7 +131,7 @@ func (t LimitTarget) String() string {
 
 // PlanLimits picks where the ceiling goes.
 //
-// The natural home is buzz-agent.slice in the user manager: no root needed, and
+// The natural home is the agents' own slice in the user manager: no root needed, and
 // it holds exactly the agents. That only works when the user manager has been
 // given the cpu and memory controllers, which on cgroup v2 is common and on v1
 // is impossible — systemd silently accepts a CPUQuota it cannot apply. There the
@@ -136,7 +150,7 @@ func PlanLimits(mode CgroupMode, delegated []string, uid int, l Limits) LimitTar
 	cpu := fmt.Sprintf("CPUQuota=%d%%", l.CPUPercent)
 	if mode == CgroupUnified && has("cpu") && has("memory") {
 		return LimitTarget{
-			Unit: "buzz-agent.slice",
+			Unit: AgentSlice,
 			Props: []string{cpu,
 				fmt.Sprintf("MemoryHigh=%dM", l.MemoryHighMB),
 				fmt.Sprintf("MemoryMax=%dM", l.MemoryMaxMB)},

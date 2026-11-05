@@ -133,7 +133,10 @@ containers  1 CPU and 3000M memory each, via the supervisor's Docker proxy
 `--apply` runs that command. Where the ceiling goes depends on the host:
 
 - **cgroup v2 with cpu and memory delegated** to your user manager: on
-  `buzz-agent.slice`, which holds exactly the agents. No root needed.
+  `buzzfleet.slice`, which the agent unit names and which holds exactly the
+  agents. No root needed. Units installed before the template named its slice
+  sit elsewhere: `buzzfleet install --force`, then restart the agents (`doctor`
+  lists them).
 - **cgroup v1, or v2 without delegation** (Ubuntu 20.04 and older): on the
   system unit `user@UID.service`, with sudo. That holds every user unit, the
   supervisor included, but not SSH sessions, so a saturated fleet still cannot
@@ -145,7 +148,7 @@ cgroup files for each agent and says which ceiling actually binds:
 
 ```
 ok   agent-a: enforced CPU 150% (on user@1000.service), memory 10500M (on user@1000.service)
-WARN agent-a: its unit sets MemoryMax=1600M but that is NOT enforced
+WARN agent-a: its unit sets MemoryMax=2048M but that is NOT enforced
 ```
 
 Override any number in `fleetd.json`:
@@ -160,7 +163,9 @@ Containers are created by dockerd, outside the agent's cgroup, so they escape
 every ceiling on it. The supervisor serves a Docker API proxy per agent, and
 each agent's `DOCKER_HOST` points at it. On container create and update the
 proxy fills in a CPU and memory cap where none was asked for and clamps one
-that asks for more; a smaller request is kept as asked. It also labels each
+that asks for more; a smaller request is kept as asked. Field names are
+matched regardless of letter case, as dockerd matches them, and a body that
+spells one field two ways is refused, as is one the proxy cannot parse. It also labels each
 container `buzzfleet.agent=<name>` and `buzzfleet.created=<unix time>`. Compose,
 SDKs and the CLI all go through it, interactive and streaming sessions included.
 

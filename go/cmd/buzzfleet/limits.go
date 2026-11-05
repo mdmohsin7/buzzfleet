@@ -52,6 +52,11 @@ func cmdLimits(h *host.Host, args []string) {
 	fmt.Printf("\n%s.\n\n  %s\n", t.Why, t)
 
 	if !apply {
+		for _, f := range enforcementLines(h, mode, t) {
+			if !f.ok && !f.warn && strings.Contains(f.msg, "fleet ceiling does not cover") {
+				fmt.Println("\n  ! " + f.msg)
+			}
+		}
 		fmt.Println("\nRun with --apply to set it. It takes effect at once, and persists.")
 		return
 	}
@@ -66,7 +71,7 @@ func cmdLimits(h *host.Host, args []string) {
 		die("%s failed: %v\n%s", t, err, strings.TrimSpace(string(out)))
 	}
 	fmt.Println("\napplied. What the kernel now enforces:")
-	for _, line := range enforcementLines(h, mode) {
+	for _, line := range enforcementLines(h, mode, t) {
 		fmt.Println("  " + line.msg)
 	}
 }
@@ -79,12 +84,21 @@ type finding struct {
 
 // enforcementLines says, per running agent, which ceilings the kernel is really
 // applying — not what the unit files claim.
-func enforcementLines(h *host.Host, mode fleet.CgroupMode) []finding {
+func enforcementLines(h *host.Host, mode fleet.CgroupMode, t fleet.LimitTarget) []finding {
 	var out []finding
 	for _, n := range h.Agents() {
 		pid := h.MainPID(n)
 		if pid == "" {
 			continue
+		}
+		// A ceiling on the agents' slice only covers agents that are in it.
+		// Units written before the template named its slice are not.
+		if !t.System {
+			if sl := h.Systemctl("show", host.UnitFor(n), "-p", "Slice", "--value"); sl != t.Unit {
+				out = append(out, finding{msg: fmt.Sprintf(
+					"%s: runs in %s, not %s, so the fleet ceiling does not cover it — run `buzzfleet install --force`, then restart it",
+					n, sl, t.Unit)})
+			}
 		}
 		c, own := host.Ceilings(pid, mode)
 		out = append(out, finding{ok: c.CPUAt != "" && c.MemoryAt != "",

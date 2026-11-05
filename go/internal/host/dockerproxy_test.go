@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -119,5 +120,36 @@ func TestProxyPassesUpgradedStreams(t *testing.T) {
 	line, err := br.ReadString('\n')
 	if err != nil || line != "echo:hello\n" {
 		t.Fatalf("stream: %q %v", line, err)
+	}
+}
+
+func TestProxySocketIsPrivate(t *testing.T) {
+	sock, _ := startProxy(t)
+	fi, err := os.Stat(sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("the socket is a door to dockerd; mode %o", fi.Mode().Perm())
+	}
+}
+
+func TestProxyRefusesWhatItCannotRead(t *testing.T) {
+	sock, got := startProxy(t)
+	big := `{"Image":"x","Env":["` + strings.Repeat("a", maxRewriteBody) + `"],"HostConfig":{"Memory":8589934592}}`
+	for name, body := range map[string]string{"oversized": big, "malformed": `{"HostConfig":`} {
+		resp, err := unixClient(sock).Post("http://docker/v1.47/containers/create", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode < 400 {
+			t.Fatalf("%s: status %d, the request must not reach dockerd", name, resp.StatusCode)
+		}
+		select {
+		case <-got:
+			t.Fatalf("%s: dockerd saw the request", name)
+		default:
+		}
 	}
 }

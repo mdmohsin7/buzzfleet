@@ -335,8 +335,9 @@ func cmdDoctor(h *host.Host) {
 
 	// Ceilings, as the kernel applies them: systemd accepts limits it cannot
 	// enforce without a word, so the unit files are not evidence.
-	mode, _ := host.CgroupMode()
-	for _, f := range append(enforcementLines(h, mode), dockerFindings(h)...) {
+	mode, delegated := host.CgroupMode()
+	target := fleet.PlanLimits(mode, delegated, os.Getuid(), hostLimits(h))
+	for _, f := range append(enforcementLines(h, mode, target), dockerFindings(h)...) {
 		if f.warn {
 			fmt.Printf("WARN %s\n", f.msg)
 			continue

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 )
 
 // ── Docker guardrail ──────────────────────────────────────────────────────────
@@ -47,6 +48,38 @@ func RewriteKind(method, path string) string {
 
 const cpuPeriod = 100000 // the kernel's default CFS period, in µs
 
+// ErrAmbiguous is returned for a body that names one field in two spellings.
+var ErrAmbiguous = fmt.Errorf("container body names a field more than once (in different letter case)")
+
+// canonical renames a field to its canonical spelling and reports its value.
+//
+// dockerd decodes with encoding/json, which matches keys case-insensitively, so
+// "memory" and "hostConfig" mean exactly what "Memory" and "HostConfig" do. A
+// proxy that only looked at the canonical spelling would write its cap next to
+// the caller's lowercase key, and whichever came last in the JSON would win.
+// Two spellings of one field are refused outright: which of them dockerd honours
+// depends on details nobody should have to reason about to trust a cap.
+func canonical(m map[string]any, key string) (any, error) {
+	var found []string
+	for k := range m {
+		if strings.EqualFold(k, key) {
+			found = append(found, k)
+		}
+	}
+	switch len(found) {
+	case 0:
+		return nil, nil
+	case 1:
+		v := m[found[0]]
+		if found[0] != key {
+			delete(m, found[0])
+			m[key] = v
+		}
+		return v, nil
+	}
+	return nil, fmt.Errorf("%w: %s", ErrAmbiguous, strings.Join(found, ", "))
+}
+
 // ClampContainer rewrites a container create or update body to fit the caps.
 //
 // Only ever lowers: a request for less than the cap is kept as asked. The body
@@ -56,9 +89,10 @@ const cpuPeriod = 100000 // the kernel's default CFS period, in µs
 //
 // For "create" the HostConfig is nested; for "update" the resource fields sit at
 // the top level. Labels are only added on create; they cannot be changed later.
+// Any error means the request must be refused, not passed on.
 func ClampContainer(kind string, body []byte, l Limits, agent string, now int64) ([]byte, []string, error) {
 	var doc map[string]any
-	if len(body) == 0 {
+	if len(bytes.TrimSpace(body)) == 0 {
 		doc = map[string]any{}
 	} else {
 		// UseNumber: a float64 round-trip would corrupt large integers in
@@ -66,7 +100,7 @@ func ClampContainer(kind string, body []byte, l Limits, agent string, now int64)
 		dec := json.NewDecoder(bytes.NewReader(body))
 		dec.UseNumber()
 		if err := dec.Decode(&doc); err != nil {
-			return nil, nil, fmt.Errorf("container %s body is not JSON: %w", kind, err)
+			return nil, nil, fmt.Errorf("container %s body is not a JSON object: %w", kind, err)
 		}
 		if doc == nil {
 			doc = map[string]any{}
@@ -75,12 +109,24 @@ func ClampContainer(kind string, body []byte, l Limits, agent string, now int64)
 
 	res := doc
 	if kind == "create" {
-		hc, _ := doc["HostConfig"].(map[string]any)
+		v, err := canonical(doc, "HostConfig")
+		if err != nil {
+			return nil, nil, err
+		}
+		hc, _ := v.(map[string]any)
 		if hc == nil {
 			hc = map[string]any{}
 			doc["HostConfig"] = hc
 		}
 		res = hc
+	}
+	fields := map[string]any{}
+	for _, k := range []string{"NanoCpus", "CpuQuota", "CpuPeriod", "Memory", "MemorySwap"} {
+		v, err := canonical(res, k)
+		if err != nil {
+			return nil, nil, err
+		}
+		fields[k] = v
 	}
 
 	var changes []string
@@ -88,16 +134,16 @@ func ClampContainer(kind string, body []byte, l Limits, agent string, now int64)
 
 	capNano := int64(l.DockerCPUs * 1e9)
 	if capNano > 0 {
-		nano := num(res["NanoCpus"])
-		quota, period := num(res["CpuQuota"]), num(res["CpuPeriod"])
+		nano := num(fields["NanoCpus"])
+		quota, period := num(fields["CpuQuota"]), num(fields["CpuPeriod"])
 		switch {
-		case quota > 0:
-			// Docker refuses NanoCpus alongside CpuQuota, so clamp in the form
-			// the caller chose.
+		case quota > 0 || period > 0:
+			// Docker refuses NanoCpus alongside CpuQuota or CpuPeriod, so clamp
+			// in the form the caller chose.
 			if period <= 0 {
 				period = cpuPeriod
 			}
-			if limit := capNano * period / 1e9; quota > limit {
+			if limit := capNano * period / 1e9; quota <= 0 || quota > limit {
 				res["CpuQuota"] = limit
 				note("cpu quota %d -> %d", quota, limit)
 			}
@@ -112,7 +158,7 @@ func ClampContainer(kind string, body []byte, l Limits, agent string, now int64)
 
 	capMem := int64(l.DockerMemoryMB) << 20
 	if capMem > 0 {
-		mem := num(res["Memory"])
+		mem := num(fields["Memory"])
 		switch {
 		case mem > capMem:
 			res["Memory"] = capMem
@@ -125,22 +171,26 @@ func ClampContainer(kind string, body []byte, l Limits, agent string, now int64)
 		}
 		// Swap is memory+swap in Docker's terms. Unlimited swap turns a memory
 		// cap into a disk-thrashing one, which on a small box is worse.
-		if mem > 0 {
-			if sw, ok := res["MemorySwap"]; ok {
-				if v := num(sw); v == -1 || v > 2*mem || (v > 0 && v < mem) {
-					res["MemorySwap"] = 2 * mem
-					note("memory+swap %d -> %dM", v, (2*mem)>>20)
-				}
+		if mem > 0 && fields["MemorySwap"] != nil {
+			if v := num(fields["MemorySwap"]); v == -1 || v > 2*mem || (v > 0 && v < mem) {
+				res["MemorySwap"] = 2 * mem
+				note("memory+swap %d -> %dM", v, (2*mem)>>20)
 			}
 		}
 	}
 
 	if kind == "create" {
-		labels, _ := doc["Labels"].(map[string]any)
+		v, err := canonical(doc, "Labels")
+		if err != nil {
+			return nil, nil, err
+		}
+		labels, _ := v.(map[string]any)
 		if labels == nil {
 			labels = map[string]any{}
 			doc["Labels"] = labels
 		}
+		// Label keys are case-sensitive in Docker, so these exact keys are the
+		// ones cleanup reads, and the caller's own values for them are replaced.
 		labels[LabelAgent] = agent
 		labels[LabelCreated] = strconv.FormatInt(now, 10)
 	}
@@ -154,8 +204,12 @@ func num(v any) int64 {
 	case float64:
 		return int64(n)
 	case json.Number:
-		i, _ := n.Int64()
-		return i
+		if i, err := n.Int64(); err == nil {
+			return i
+		}
+		// "4e9" is a valid JSON number that Int64 will not parse.
+		f, _ := n.Float64()
+		return int64(f)
 	case int64:
 		return n
 	}

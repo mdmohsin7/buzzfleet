@@ -86,7 +86,7 @@ func TestHeartbeatConfigValidate(t *testing.T) {
 		{},
 		{URL: "https://example.invalid/hb"},
 		{URL: "https://example.invalid/api/v1/push/influx/write", Format: "influx", BasicUser: "123", PasswordFile: "/x"},
-		{URL: "http://127.0.0.1:9/x", BearerTokenFile: "/x"},
+		{URL: "http://localhost:9/x", BearerTokenFile: "/x"},
 	}
 	for _, c := range ok {
 		if err := c.Validate(); err != nil {

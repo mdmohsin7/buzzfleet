@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/mdmohsin7/buzzfleet/internal/fleet"
 	"github.com/mdmohsin7/buzzfleet/internal/host"
 )
 
@@ -29,6 +30,8 @@ StartLimitBurst=5
 Type=simple
 Environment=FLEET_HOME=%s
 ExecStart=%s run-agent %%i
+# Named, so the fleet-wide ceiling from "buzzfleet limits" has a slice to go on.
+Slice=%s
 Restart=on-failure
 RestartSec=5s
 
@@ -61,6 +64,10 @@ RestartSec=10s
 WantedBy=default.target
 `
 
+func agentUnitBody(fleetHome, exe string) string {
+	return fmt.Sprintf(agentUnit, fleetHome, exe, fleet.AgentSlice)
+}
+
 // cmdInstall writes the systemd units and checks the two things that are easy
 // to get wrong and miserable to debug later.
 func cmdInstall(h *host.Host, args []string) {
@@ -87,7 +94,7 @@ func cmdInstall(h *host.Host, args []string) {
 	}
 
 	units := map[string]string{
-		"buzz-agent@.service": fmt.Sprintf(agentUnit, h.FleetHome, exe),
+		"buzz-agent@.service": agentUnitBody(h.FleetHome, exe),
 		"buzzfleetd.service":  fmt.Sprintf(supervisorUnit, h.FleetHome, exe),
 	}
 	for name, body := range units {
@@ -203,6 +210,11 @@ func cmdRunAgent(h *host.Host, args []string) {
 	}, ":"))
 	env = setEnv(env, "BUZZ_RELAY_URL", conf.Relay)
 	env = setEnv(env, "BUZZ_ACP_AGENT_COMMAND", agentCmd)
+	// Containers are made by dockerd, outside this unit's cgroup, so they are
+	// capped on the way in instead: the supervisor serves this socket.
+	if cfg, err := loadConfig(h); err == nil && !cfg.Limits.NoDockerProxy {
+		env = setEnv(env, "DOCKER_HOST", "unix://"+host.DockerSocketFor(name))
+	}
 
 	argv := []string{"buzz-acp", "--respond-to", respondTo}
 	if conf.Owner != "" {

@@ -226,7 +226,7 @@ func EncodeInflux(s Snapshot) []byte {
 
 // AllStates is every state an agent can report, so the state enum always
 // carries a full set of series.
-var AllStates = []State{StateOK, StateWedged, StateStalled, StateDown, StateUnknown, "auth", "limited"}
+var AllStates = []State{StateOK, StateWedged, StateStalled, StateDown, StateUnknown, StateAuth, StateLimited}
 
 func knownStates(cur State) []State {
 	for _, s := range AllStates {

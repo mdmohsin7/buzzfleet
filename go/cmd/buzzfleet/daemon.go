@@ -33,6 +33,9 @@ type daemonState struct {
 	Seen        []string           `json:"seen"`
 	HealHistory map[string][]int64 `json:"healHistory"`
 	GaveUp      map[string]int64   `json:"gaveUp"`
+	// Agents last reported as auth/limited, so a supervisor restart does not
+	// announce the same expired login again.
+	Inference map[string]string `json:"inference"`
 }
 
 func statePath(h *host.Host) string {
@@ -54,6 +57,9 @@ func loadState(h *host.Host) *daemonState {
 	}
 	if s.GaveUp == nil {
 		s.GaveUp = map[string]int64{}
+	}
+	if s.Inference == nil {
+		s.Inference = map[string]string{}
 	}
 	return s
 }
@@ -104,6 +110,7 @@ func runDaemon(h *host.Host, cfg *fleet.Config) {
 	view := &fleetView{}
 	go healthLoop(ctx, h, cfg, state, view)
 	go subscribeLoop(ctx, h, cfg, state, seen)
+	go dockerLoop(ctx, h, cfg)
 	go heartbeatLoop(ctx, h, cfg, view)
 
 	sig := make(chan os.Signal, 1)
@@ -316,7 +323,7 @@ func helpText(cfg *fleet.Config) string {
 		"restart <agent>     atomic; cannot orphan a second harness\n"+
 		"start|stop <agent>\n"+
 		"logs <agent> [n]    recent journal lines\n"+
-		"doctor              duplicates, permissions, membership\n"+
+		"doctor              duplicates, permissions, membership, limits\n"+
 		"```\nAddress me as `@%s`%s. Only the owner is obeyed.",
 		cfg.Name, cfg.Host, cfg.Name, broadcast)
 }
@@ -380,6 +387,13 @@ func tick(h *host.Host, cfg *fleet.Config, state *daemonState, strikes map[strin
 	fleet.PruneHeals(state.HealHistory, now, int64(cfg.HealWindowSecs))
 
 	rows := assessAll(h, cfg)
+	notices, next := fleet.InferenceNotices(cfg.Host, state.Inference, rows)
+	state.Inference = next
+	for _, n := range notices {
+		logf("%s", n)
+		say(h, cfg, n, "")
+	}
+
 	view.update(rows, h, state.HealHistory, time.Unix(now, 0), int64(cfg.HealWindowSecs))
 	for _, a := range rows {
 		if cfg.NoAutoHeal {

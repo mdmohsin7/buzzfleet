@@ -7,7 +7,7 @@ import (
 
 func cfg() *Config {
 	return (&Config{
-		Name:      "fleet-clawd",
+		Name:      "fleet-host-1",
 		Broadcast: "fleet",
 		PublicKey: strings.Repeat("f", 64),
 		Owner:     strings.Repeat("a", 64),
@@ -26,7 +26,7 @@ func msg(content string, opts ...func(*Message)) Message {
 
 func TestAddressedByOwnName(t *testing.T) {
 	for _, in := range []string{
-		"@fleet-clawd status", "fleet-clawd status", "fleet-clawd: status", "fleet-clawd, status",
+		"@fleet-host-1 status", "fleet-host-1 status", "fleet-host-1: status", "fleet-host-1, status",
 	} {
 		c, ok := ParseCommand(msg(in), cfg())
 		if !ok || c.Text != "status" {
@@ -43,15 +43,15 @@ func TestBroadcastNameReachesEveryHost(t *testing.T) {
 }
 
 func TestPTagMentionCounts(t *testing.T) {
-	m := msg("@somebody restart charles", func(m *Message) { m.PTags = []string{strings.Repeat("f", 64)} })
+	m := msg("@somebody restart agent-a", func(m *Message) { m.PTags = []string{strings.Repeat("f", 64)} })
 	c, ok := ParseCommand(m, cfg())
-	if !ok || c.Text != "restart charles" {
+	if !ok || c.Text != "restart agent-a" {
 		t.Fatalf("got %+v ok=%v", c, ok)
 	}
 }
 
 func TestMessagesForOthersIgnored(t *testing.T) {
-	for _, in := range []string{"hey charles can you look at this", ""} {
+	for _, in := range []string{"hey agent-a can you look at this", ""} {
 		if _, ok := ParseCommand(msg(in), cfg()); ok {
 			t.Fatalf("%q should not be treated as a command", in)
 		}
@@ -77,8 +77,8 @@ func TestRegexLikeNameIsLiteral(t *testing.T) {
 }
 
 func TestParseVerb(t *testing.T) {
-	v, args := ParseVerb("  LOGS charles 40 ")
-	if v != "logs" || len(args) != 2 || args[0] != "charles" {
+	v, args := ParseVerb("  LOGS agent-a 40 ")
+	if v != "logs" || len(args) != 2 || args[0] != "agent-a" {
 		t.Fatalf("got %q %v", v, args)
 	}
 	if v, _ := ParseVerb(""); v != "" {
@@ -240,7 +240,7 @@ func TestPruneHeals(t *testing.T) {
 
 func TestShortRepliesStayInline(t *testing.T) {
 	// A status table is the common case and must not cost an extra tap.
-	short := "**clawd**\n```\nAGENT  STATE\ncharles active\n\ncharles ok\n```"
+	short := "**host-1**\n```\nAGENT  STATE\nagent-a active\n\nagent-a ok\n```"
 	if ShouldThread(short) {
 		t.Fatalf("a short reply should be inline: %d lines", strings.Count(short, "\n")+1)
 	}
@@ -249,7 +249,7 @@ func TestShortRepliesStayInline(t *testing.T) {
 func TestLongRepliesAreThreaded(t *testing.T) {
 	var b strings.Builder
 	for i := 0; i < 30; i++ {
-		b.WriteString("Aug 01 15:00:00 clawd buzz-acp[1]: some journal line\n")
+		b.WriteString("Aug 01 15:00:00 host-1 buzz-acp[1]: some journal line\n")
 	}
 	if !ShouldThread(b.String()) {
 		t.Fatal("a screenful of logs should be threaded")

@@ -6,11 +6,11 @@ Run [Buzz](https://github.com/block/buzz) agents on your own server, and manage 
 @fleet status
 
 AGENT       STATE     BOOT  PID       UP    WORKDIR
-charles     active    yes   4067374   6h    /srv/omi
-scout       active    yes   4066466   6h    /srv/scratch
+agent-a     active    yes   41207     6h    /srv/agent-a
+agent-b     active    yes   41388     6h    /srv/agent-b
 
-charles     ok        present on relay
-scout       ok        present on relay
+agent-a     ok        present on relay
+agent-b     ok        present on relay
 ```
 
 That works from the desktop app, the mobile app and the web client, because it
@@ -60,10 +60,10 @@ introduces itself in the channel with its command list.
 Add an agent:
 
 ```bash
-buzzfleet add scout --workdir /srv/scratch --invite v2.... \
-  --display-name "Scout" --prompt "You research things and report back briefly."
-buzzfleet channels scout
-buzzfleet join scout <channel-uuid>
+buzzfleet add agent-b --workdir /srv/agent-b --invite v2.... \
+  --display-name "Agent B" --prompt "You research things and report back briefly."
+buzzfleet channels agent-b
+buzzfleet join agent-b <channel-uuid>
 ```
 
 ## Commands
@@ -77,7 +77,7 @@ restart <agent>
 start | stop <agent>
 logs <agent> [n]
 prompt <agent> [text]   show or set its personality
-doctor              duplicates, permissions, membership
+doctor              duplicates, permissions, membership, enforced limits
 ```
 
 Only the owner is obeyed. Short replies land inline; long ones are threaded.
@@ -89,14 +89,14 @@ An agent's personality is its system prompt, set at creation with `--prompt` or
 `--prompt-file` and changed later from either surface:
 
 ```bash
-buzzfleet prompt scout --edit          # or --set "..." / --file prompt.md
+buzzfleet prompt agent-b --edit          # or --set "..." / --file prompt.md
 ```
 
 It is a plain file at `agents/<name>/system-prompt.md`; the agent restarts to
 pick it up.
 
 From the shell, the same operations plus `add`, `rename`, `reap`, `join`,
-`channels`, `install` and `init`. Run `buzzfleet` for the full list.
+`channels`, `limits`, `install` and `init`. Run `buzzfleet` for the full list.
 
 ## Health
 
@@ -108,10 +108,102 @@ From the shell, the same operations plus `add`, `rename`, `reap`, `join`,
 | `down` | not running |
 | `unknown` | the relay was unreachable — never blamed on the agent |
 
+An agent can also be up, present and answering while every turn fails: its
+model login expired, or the account ran out of usage. The supervisor reads the
+coding agent's own transcripts (Claude Code under `$CLAUDE_CONFIG_DIR/projects`,
+Codex under `$CODEX_HOME/sessions`, for the agent's workdir and repos below it)
+and the latest turn decides:
+
+| state | meaning |
+|---|---|
+| `auth` | the model provider rejected the agent's login (401 / authentication_failed). Claude Code only: Codex leaves no record of an auth failure |
+| `limited` | the account hit a usage limit (429 / rate_limit), shown with its reset time when the provider gave one. For Codex, read from the usage snapshot it records with each token count: a window at 100% (without credits) or a reached-limit marker |
+
+Neither is ever restarted, because a restart fixes neither. The supervisor
+says so once in the channel, naming every agent that went down for the same
+reason in one message, since one account limit takes them all at once:
+
+```
+host-1 — agent-a, agent-b, agent-c are out of model usage (usage limit until Jan 12 22:00 UTC).
+Every turn is failing, so I am not restarting them: a restart does not fix this.
+```
+
+The state clears on the agent's next good turn. A limit with a known reset is
+also assumed lifted once the reset passes; the supervisor says the agent
+"should work again" rather than that it recovered, since nothing has run yet.
+
+Transcripts are matched to agents by workdir. Claude Code's directory names
+turn both `/` and `-` into `-`, so `/srv/agent/b` and `/srv/agent-b` look the
+same; give agents workdirs that do not nest inside each other's names.
+Only the coding agent's own error records count: a `401` printed by a command
+the agent ran is not its credentials failing.
+
 `wedged` and `stalled` are healed automatically after two consecutive
 confirmations, and the supervisor says what it did in the channel. It stops
 after three restarts an hour and tells you once, because an agent a restart
 cannot fix should not be restarted forever.
+
+## Resource limits
+
+A small host running several coding agents is one parallel test suite away
+from a load of 50, and then sshd, the supervisor and every agent crawl
+together. `buzzfleet limits` sizes a ceiling for all the agents together from
+the host's cores and RAM, keeping half a core and an eighth of RAM (at least
+1 GiB) for the host itself:
+
+```
+$ buzzfleet limits
+host        2 cores, 12000M RAM, cgroup hybrid
+agents      150% CPU and 10500M memory between them
+containers  1 CPU and 3000M memory each, via the supervisor's Docker proxy
+
+  sudo systemctl set-property user@1000.service CPUAccounting=yes MemoryAccounting=yes CPUQuota=150% MemoryLimit=10500M
+```
+
+`--apply` runs that command. Where the ceiling goes depends on the host:
+
+- **cgroup v2 with cpu and memory delegated** to your user manager: on
+  `buzzfleet.slice`, which the agent unit names and which holds exactly the
+  agents. No root needed. Units installed before the template named its slice
+  sit elsewhere: `buzzfleet install --force`, then restart the agents (`doctor`
+  lists them).
+- **cgroup v1, or v2 without delegation** (older distributions): on the
+  system unit `user@UID.service`, with sudo. That holds every user unit, the
+  supervisor included, but not SSH sessions, so a saturated fleet still cannot
+  lock you out. Per-agent limits cannot work here at all: systemd accepts a
+  `MemoryMax=` in an agent's drop-in and silently ignores it.
+
+Because systemd accepts limits it cannot apply, `doctor` reads the kernel's own
+cgroup files for each agent and says which ceiling actually binds:
+
+```
+ok   agent-a: enforced CPU 150% (on user@1000.service), memory 10500M (on user@1000.service)
+WARN agent-a: its unit sets MemoryMax=2048M but that is NOT enforced
+```
+
+Override any number in `fleetd.json`:
+
+```json
+"limits": { "cpuPercent": 120, "memoryMaxMB": 8000, "dockerCpus": 0.5, "dockerMemoryMB": 2048 }
+```
+
+### Containers
+
+Containers are created by dockerd, outside the agent's cgroup, so they escape
+every ceiling on it. The supervisor serves a Docker API proxy per agent, and
+each agent's `DOCKER_HOST` points at it. On container create and update the
+proxy fills in a CPU and memory cap where none was asked for and clamps one
+that asks for more; a smaller request is kept as asked. Field names are
+matched regardless of letter case, as dockerd matches them, and a body that
+spells one field two ways is refused, as is one the proxy cannot parse. It also labels each
+container `buzzfleet.agent=<name>` and `buzzfleet.created=<unix time>`. Compose,
+SDKs and the CLI all go through it, interactive and streaming sessions included.
+
+This is a guardrail, not a security boundary: an agent in the `docker` group can
+still reach `/var/run/docker.sock` directly. `docker build` steps run inside
+BuildKit rather than as containers, so they are not capped. Set
+`"noDockerProxy": true` under `limits` to turn the proxy off. An agent picks up
+the proxy when it next restarts, and `doctor` lists the ones that have not.
 
 ## Heartbeat
 

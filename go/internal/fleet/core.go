@@ -15,7 +15,7 @@ import (
 
 // Config is the supervisor's identity and manners.
 type Config struct {
-	Name       string `json:"name"`       // this host's supervisor, e.g. "fleet-clawd"
+	Name       string `json:"name"`       // this host's supervisor, e.g. "fleet-host-1"
 	Broadcast  string `json:"broadcast"`  // shared name every host answers to, e.g. "fleet"
 	Host       string `json:"host"`       // hostname used to label replies
 	Relay      string `json:"relay"`      //
@@ -30,6 +30,8 @@ type Config struct {
 	HealWindowSecs int `json:"healWindowSecs"`
 
 	NoAutoHeal bool `json:"noAutoHeal"`
+
+	Limits LimitsConfig `json:"limits"`
 
 	Heartbeat HeartbeatConfig `json:"heartbeat"`
 }
@@ -155,6 +157,10 @@ type Assessment struct {
 	Unit   string
 	State  State
 	Detail string
+
+	// LimitAssumedLifted: ok only because a usage limit's reset time has
+	// passed, with no turn since to prove it.
+	LimitAssumedLifted bool
 }
 
 // Assess turns raw observations into one of the states above.

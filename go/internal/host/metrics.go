@@ -3,7 +3,6 @@ package host
 import (
 	"bufio"
 	"os"
-	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -23,7 +22,7 @@ func ReadMetrics(diskPath string) fleet.HostMetrics {
 			m.Load15, _ = strconv.ParseFloat(f[2], 64)
 		}
 	}
-	m.CPUs = runtime.NumCPU()
+	m.CPUs = NumCPU()
 	if f, err := os.Open("/proc/meminfo"); err == nil {
 		s := bufio.NewScanner(f)
 		for s.Scan() {

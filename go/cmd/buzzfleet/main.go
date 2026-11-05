@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mdmohsin7/buzzfleet/internal/fleet"
 	"github.com/mdmohsin7/buzzfleet/internal/host"
@@ -28,6 +29,7 @@ const usage = `buzzfleet — run and supervise Buzz agents on this machine
   logs <agent> [-n N]           recent journal output
   doctor                        duplicates, permissions, membership
   reap [--dry-run]              kill harnesses systemd is not supervising
+  limits [--apply]              cap the CPU and memory all agents can use
   heartbeat [--send]            show, or send once, the out-of-band heartbeat
   add <name> --workdir <path> --invite <code> [--display-name "..."]
        [--prompt "..." | --prompt-file <path>]
@@ -100,6 +102,8 @@ func main() {
 		cmdDoctor(h)
 	case "reap":
 		cmdReap(h, args)
+	case "limits":
+		cmdLimits(h, args)
 	case "heartbeat":
 		cmdHeartbeat(h, args)
 	case "channels":
@@ -229,7 +233,14 @@ func assessAll(h *host.Host, cfg *fleet.Config) []fleet.Assessment {
 				}
 			}
 		}
-		out = append(out, fleet.Assess(n, unit, present, child, hasID))
+		a := fleet.Assess(n, unit, present, child, hasID)
+		// Only worth reading transcripts for an agent that otherwise looks
+		// fine: that is the one whose failing turns nothing else would catch.
+		if a.State == fleet.StateOK {
+			st, detail := fleet.InferenceState(fleet.Latest(h.InferenceSignals(n)), time.Now())
+			a = fleet.WithInference(a, st, detail)
+		}
+		out = append(out, a)
 	}
 	return out
 }
@@ -331,6 +342,18 @@ func cmdDoctor(h *host.Host) {
 	}
 	if clean {
 		say(true, fmt.Sprintf("%d harness process(es), all supervised, none duplicated", len(procs)))
+	}
+
+	// Ceilings, as the kernel applies them: systemd accepts limits it cannot
+	// enforce without a word, so the unit files are not evidence.
+	mode, delegated := host.CgroupMode()
+	target := fleet.PlanLimits(mode, delegated, os.Getuid(), hostLimits(h))
+	for _, f := range append(enforcementLines(h, mode, target), dockerFindings(h)...) {
+		if f.warn {
+			fmt.Printf("WARN %s\n", f.msg)
+			continue
+		}
+		say(f.ok, f.msg)
 	}
 
 	_, cfgErr := loadConfig(h)

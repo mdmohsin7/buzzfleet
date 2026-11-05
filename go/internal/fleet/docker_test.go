@@ -12,7 +12,7 @@ var testCaps = Limits{DockerCPUs: 1, DockerMemoryMB: 3072}
 
 func clamp(t *testing.T, kind, body string) (map[string]any, []string) {
 	t.Helper()
-	out, changes, err := ClampContainer(kind, []byte(body), testCaps, "bigboy", 1762300000)
+	out, changes, err := ClampContainer(kind, []byte(body), testCaps, "agent-a", 1762300000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +33,7 @@ func TestClampAddsDefaultsAndLabels(t *testing.T) {
 		t.Fatalf("defaults not applied: %v", hc)
 	}
 	labels := doc["Labels"].(map[string]any)
-	if labels[LabelAgent] != "bigboy" || labels[LabelCreated] != "1762300000" || labels["keep"] != "me" {
+	if labels[LabelAgent] != "agent-a" || labels[LabelCreated] != "1762300000" || labels["keep"] != "me" {
 		t.Fatalf("labels: %v", labels)
 	}
 	if hc["Binds"] == nil || doc["Image"] != "php:8" {

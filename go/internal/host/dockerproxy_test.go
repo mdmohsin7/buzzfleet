@@ -55,7 +55,7 @@ func startProxy(t *testing.T) (string, chan map[string]any) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	p := &DockerProxy{Agent: "bigboy", Socket: sock, Upstream: up,
+	p := &DockerProxy{Agent: "agent-a", Socket: sock, Upstream: up,
 		Limits: fleet.Limits{DockerCPUs: 1, DockerMemoryMB: 512}, Logf: t.Logf}
 	go func() { _ = p.Serve(ctx) }()
 	for i := 0; i < 100; i++ {
@@ -91,7 +91,7 @@ func TestProxyCapsContainerCreate(t *testing.T) {
 	if hc["Memory"].(float64) != 512<<20 || hc["NanoCpus"].(float64) != 1e9 {
 		t.Fatalf("daemon saw an uncapped container: %v", hc)
 	}
-	if doc["Labels"].(map[string]any)[fleet.LabelAgent] != "bigboy" {
+	if doc["Labels"].(map[string]any)[fleet.LabelAgent] != "agent-a" {
 		t.Fatalf("labels: %v", doc["Labels"])
 	}
 }

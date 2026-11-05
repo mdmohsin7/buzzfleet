@@ -123,11 +123,11 @@ the host's cores and RAM, keeping half a core and an eighth of RAM (at least
 
 ```
 $ buzzfleet limits
-host        2 cores, 11941M RAM, cgroup hybrid
-agents      150% CPU and 10449M memory between them
-containers  1 CPU and 2985M memory each, via the supervisor's Docker proxy
+host        2 cores, 12000M RAM, cgroup hybrid
+agents      150% CPU and 10500M memory between them
+containers  1 CPU and 3000M memory each, via the supervisor's Docker proxy
 
-  sudo systemctl set-property user@1001.service CPUAccounting=yes MemoryAccounting=yes CPUQuota=150% MemoryLimit=10449M
+  sudo systemctl set-property user@1000.service CPUAccounting=yes MemoryAccounting=yes CPUQuota=150% MemoryLimit=10500M
 ```
 
 `--apply` runs that command. Where the ceiling goes depends on the host:
@@ -144,8 +144,8 @@ Because systemd accepts limits it cannot apply, `doctor` reads the kernel's own
 cgroup files for each agent and says which ceiling actually binds:
 
 ```
-ok   dexy: enforced CPU 150% (on user@1001.service), memory 10449M (on user@1001.service)
-WARN dexy: its unit sets MemoryMax=1600M but that is NOT enforced
+ok   agent-a: enforced CPU 150% (on user@1000.service), memory 10500M (on user@1000.service)
+WARN agent-a: its unit sets MemoryMax=1600M but that is NOT enforced
 ```
 
 Override any number in `fleetd.json`:

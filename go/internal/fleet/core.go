@@ -152,6 +152,10 @@ type Assessment struct {
 	Unit   string
 	State  State
 	Detail string
+
+	// LimitAssumedLifted: ok only because a usage limit's reset time has
+	// passed, with no turn since to prove it.
+	LimitAssumedLifted bool
 }
 
 // Assess turns raw observations into one of the states above.

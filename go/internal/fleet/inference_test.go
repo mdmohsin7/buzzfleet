@@ -248,3 +248,19 @@ func TestTranscriptOwnership(t *testing.T) {
 		t.Fatal("a sibling with a shared prefix is not inside")
 	}
 }
+
+func TestCodexReachedMarkerBeatsCredits(t *testing.T) {
+	// Credits carry an account past 100%, but not past an explicit limit.
+	line := strings.Replace(strings.Replace(codexUsage(40, ""), `"has_credits":false`, `"has_credits":true`, 1),
+		`"rate_limit_reached_type":null`, `"rate_limit_reached_type":"usage_limit_reached"`, 1)
+	if s, _ := ParseCodexLine([]byte(line)); s.Kind != SigLimited {
+		t.Fatalf("got %+v", s)
+	}
+}
+
+func TestCodexOnlyTokenCountsCarryUsage(t *testing.T) {
+	line := strings.Replace(codexUsage(100, ""), `"type":"token_count"`, `"type":"other_event"`, 1)
+	if _, ok := ParseCodexLine([]byte(line)); ok {
+		t.Fatal("only token_count records are read")
+	}
+}

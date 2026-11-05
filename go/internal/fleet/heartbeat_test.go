@@ -116,6 +116,8 @@ func TestHeartbeatConfigValidate(t *testing.T) {
 		{URL: "https://x", BasicUser: "123", PasswordFile: "/a", BearerTokenFile: "/b"},
 		{URL: "http://example.invalid/x", BearerTokenFile: "/x"},
 		{URL: "http://localhost.example.invalid/x", BasicUser: "u", PasswordFile: "/x"},
+		{URL: "http://u:p@example.invalid/x"},
+		{URL: "https://example.invalid/%zz"},
 	}
 	for _, c := range bad {
 		if err := c.Validate(); err == nil {

@@ -3,6 +3,7 @@ package fleet
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -52,6 +53,12 @@ func (c HeartbeatConfig) Validate() error {
 	if !strings.HasPrefix(c.URL, "https://") && !strings.HasPrefix(c.URL, "http://") {
 		return fmt.Errorf("heartbeat url must be http(s): %q", c.URL)
 	}
+	p, err := url.Parse(c.URL)
+	if err != nil || p.Host == "" {
+		// Said once here, rather than as a parse error quoting the whole
+		// URL in the log on every failed beat.
+		return fmt.Errorf("heartbeat url does not parse")
+	}
 	switch c.Format {
 	case "", "json", "influx":
 	default:
@@ -63,7 +70,8 @@ func (c HeartbeatConfig) Validate() error {
 	if c.BasicUser != "" && c.BearerTokenFile != "" {
 		return fmt.Errorf("heartbeat: use basic auth or a bearer token, not both")
 	}
-	if (c.BasicUser != "" || c.BearerTokenFile != "") && strings.HasPrefix(c.URL, "http://") && !loopback(c.URL) {
+	creds := c.BasicUser != "" || c.BearerTokenFile != "" || p.User != nil
+	if creds && p.Scheme == "http" && !loopback(c.URL) {
 		return fmt.Errorf("heartbeat: credentials over plain http would travel in cleartext; use https")
 	}
 	return nil

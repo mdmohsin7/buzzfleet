@@ -216,3 +216,11 @@ func TestPlaceV1CatchesAForkOnTheSecondPass(t *testing.T) {
 		t.Fatalf("moved=%v calls=%d err=%v", moved, *calls, err)
 	}
 }
+
+func TestPlaceV1ReportsAFailedMove(t *testing.T) {
+	root, proc := fakeV1(t)
+	_, err := PlaceV1(root, proc, unit, "100", func([]string) error { return os.ErrPermission })
+	if err == nil || !strings.Contains(err.Error(), "moving processes into the cpu cgroup failed") {
+		t.Fatalf("a refused sudo must surface as such: %v", err)
+	}
+}

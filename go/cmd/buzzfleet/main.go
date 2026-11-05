@@ -28,6 +28,7 @@ const usage = `buzzfleet — run and supervise Buzz agents on this machine
   logs <agent> [-n N]           recent journal output
   doctor                        duplicates, permissions, membership
   reap [--dry-run]              kill harnesses systemd is not supervising
+  limits [--apply]              cap the CPU and memory all agents can use
   add <name> --workdir <path> --invite <code> [--display-name "..."]
        [--prompt "..." | --prompt-file <path>]
                                 provision a new agent end to end
@@ -99,6 +100,8 @@ func main() {
 		cmdDoctor(h)
 	case "reap":
 		cmdReap(h, args)
+	case "limits":
+		cmdLimits(h, args)
 	case "channels":
 		cmdChannels(h, args)
 	case "join":
@@ -328,6 +331,18 @@ func cmdDoctor(h *host.Host) {
 	}
 	if clean {
 		say(true, fmt.Sprintf("%d harness process(es), all supervised, none duplicated", len(procs)))
+	}
+
+	// Ceilings, as the kernel applies them: systemd accepts limits it cannot
+	// enforce without a word, so the unit files are not evidence.
+	mode, delegated := host.CgroupMode()
+	target := fleet.PlanLimits(mode, delegated, os.Getuid(), hostLimits(h))
+	for _, f := range append(enforcementLines(h, mode, target), dockerFindings(h)...) {
+		if f.warn {
+			fmt.Printf("WARN %s\n", f.msg)
+			continue
+		}
+		say(f.ok, f.msg)
 	}
 
 	_, cfgErr := loadConfig(h)

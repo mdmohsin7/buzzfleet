@@ -77,7 +77,7 @@ restart <agent>
 start | stop <agent>
 logs <agent> [n]
 prompt <agent> [text]   show or set its personality
-doctor              duplicates, permissions, membership
+doctor              duplicates, permissions, membership, enforced limits
 ```
 
 Only the owner is obeyed. Short replies land inline; long ones are threaded.
@@ -96,7 +96,7 @@ It is a plain file at `agents/<name>/system-prompt.md`; the agent restarts to
 pick it up.
 
 From the shell, the same operations plus `add`, `rename`, `reap`, `join`,
-`channels`, `install` and `init`. Run `buzzfleet` for the full list.
+`channels`, `limits`, `install` and `init`. Run `buzzfleet` for the full list.
 
 ## Health
 
@@ -112,6 +112,68 @@ From the shell, the same operations plus `add`, `rename`, `reap`, `join`,
 confirmations, and the supervisor says what it did in the channel. It stops
 after three restarts an hour and tells you once, because an agent a restart
 cannot fix should not be restarted forever.
+
+## Resource limits
+
+A small host running several coding agents is one parallel test suite away
+from a load of 50, and then sshd, the supervisor and every agent crawl
+together. `buzzfleet limits` sizes a ceiling for all the agents together from
+the host's cores and RAM, keeping half a core and an eighth of RAM (at least
+1 GiB) for the host itself:
+
+```
+$ buzzfleet limits
+host        2 cores, 12000M RAM, cgroup hybrid
+agents      150% CPU and 10500M memory between them
+containers  1 CPU and 3000M memory each, via the supervisor's Docker proxy
+
+  sudo systemctl set-property user@1000.service CPUAccounting=yes MemoryAccounting=yes CPUQuota=150% MemoryLimit=10500M
+```
+
+`--apply` runs that command. Where the ceiling goes depends on the host:
+
+- **cgroup v2 with cpu and memory delegated** to your user manager: on
+  `buzzfleet.slice`, which the agent unit names and which holds exactly the
+  agents. No root needed. Units installed before the template named its slice
+  sit elsewhere: `buzzfleet install --force`, then restart the agents (`doctor`
+  lists them).
+- **cgroup v1, or v2 without delegation** (older distributions): on the
+  system unit `user@UID.service`, with sudo. That holds every user unit, the
+  supervisor included, but not SSH sessions, so a saturated fleet still cannot
+  lock you out. Per-agent limits cannot work here at all: systemd accepts a
+  `MemoryMax=` in an agent's drop-in and silently ignores it.
+
+Because systemd accepts limits it cannot apply, `doctor` reads the kernel's own
+cgroup files for each agent and says which ceiling actually binds:
+
+```
+ok   agent-a: enforced CPU 150% (on user@1000.service), memory 10500M (on user@1000.service)
+WARN agent-a: its unit sets MemoryMax=2048M but that is NOT enforced
+```
+
+Override any number in `fleetd.json`:
+
+```json
+"limits": { "cpuPercent": 120, "memoryMaxMB": 8000, "dockerCpus": 0.5, "dockerMemoryMB": 2048 }
+```
+
+### Containers
+
+Containers are created by dockerd, outside the agent's cgroup, so they escape
+every ceiling on it. The supervisor serves a Docker API proxy per agent, and
+each agent's `DOCKER_HOST` points at it. On container create and update the
+proxy fills in a CPU and memory cap where none was asked for and clamps one
+that asks for more; a smaller request is kept as asked. Field names are
+matched regardless of letter case, as dockerd matches them, and a body that
+spells one field two ways is refused, as is one the proxy cannot parse. It also labels each
+container `buzzfleet.agent=<name>` and `buzzfleet.created=<unix time>`. Compose,
+SDKs and the CLI all go through it, interactive and streaming sessions included.
+
+This is a guardrail, not a security boundary: an agent in the `docker` group can
+still reach `/var/run/docker.sock` directly. `docker build` steps run inside
+BuildKit rather than as containers, so they are not capped. Set
+`"noDockerProxy": true` under `limits` to turn the proxy off. An agent picks up
+the proxy when it next restarts, and `doctor` lists the ones that have not.
 
 ## Layout
 

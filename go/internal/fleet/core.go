@@ -30,6 +30,8 @@ type Config struct {
 	HealWindowSecs int `json:"healWindowSecs"`
 
 	NoAutoHeal bool `json:"noAutoHeal"`
+
+	Limits LimitsConfig `json:"limits"`
 }
 
 func (c *Config) WithDefaults() *Config {

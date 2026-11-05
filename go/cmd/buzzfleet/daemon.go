@@ -107,9 +107,11 @@ func runDaemon(h *host.Host, cfg *fleet.Config) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go healthLoop(ctx, h, cfg, state)
+	view := &fleetView{}
+	go healthLoop(ctx, h, cfg, state, view)
 	go subscribeLoop(ctx, h, cfg, state, seen)
 	go dockerLoop(ctx, h, cfg)
+	go heartbeatLoop(ctx, h, cfg, view)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -363,7 +365,7 @@ func capture(fn func()) string {
 
 // ── health and auto-heal ──────────────────────────────────────────────────────
 
-func healthLoop(ctx context.Context, h *host.Host, cfg *fleet.Config, state *daemonState) {
+func healthLoop(ctx context.Context, h *host.Host, cfg *fleet.Config, state *daemonState, view *fleetView) {
 	if cfg.NoAutoHeal {
 		logf("auto-heal disabled by config")
 	}
@@ -375,12 +377,12 @@ func healthLoop(ctx context.Context, h *host.Host, cfg *fleet.Config, state *dae
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			tick(h, cfg, state, strikes)
+			tick(h, cfg, state, strikes, view)
 		}
 	}
 }
 
-func tick(h *host.Host, cfg *fleet.Config, state *daemonState, strikes map[string]int) {
+func tick(h *host.Host, cfg *fleet.Config, state *daemonState, strikes map[string]int, view *fleetView) {
 	now := time.Now().Unix()
 	fleet.PruneHeals(state.HealHistory, now, int64(cfg.HealWindowSecs))
 
@@ -392,6 +394,7 @@ func tick(h *host.Host, cfg *fleet.Config, state *daemonState, strikes map[strin
 		say(h, cfg, n, "")
 	}
 
+	view.update(rows, h, state.HealHistory, time.Unix(now, 0), int64(cfg.HealWindowSecs))
 	for _, a := range rows {
 		if cfg.NoAutoHeal {
 			continue

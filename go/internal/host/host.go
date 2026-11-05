@@ -93,13 +93,22 @@ func (h *Host) MainPID(name string) string {
 	return pid
 }
 
-func (h *Host) Uptime(name string) string {
+// UpSince is when the unit last became active, or zero if unknown.
+func (h *Host) UpSince(name string) time.Time {
 	ts := h.Systemctl("show", UnitFor(name), "-p", "ActiveEnterTimestamp", "--value")
 	if ts == "" {
-		return "-"
+		return time.Time{}
 	}
 	t, err := time.Parse("Mon 2006-01-02 15:04:05 MST", ts)
 	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+func (h *Host) Uptime(name string) string {
+	t := h.UpSince(name)
+	if t.IsZero() {
 		return "-"
 	}
 	d := time.Since(t)

@@ -205,6 +205,52 @@ BuildKit rather than as containers, so they are not capped. Set
 `"noDockerProxy": true` under `limits` to turn the proxy off. An agent picks up
 the proxy when it next restarts, and `doctor` lists the ones that have not.
 
+## Heartbeat
+
+Everything the supervisor says goes through the relay. So when the relay or
+the host is wedged, nothing says anything, and silence looks just like "all
+fine". The optional heartbeat pushes host and fleet state straight to a
+monitoring endpoint every minute. The receiver then alerts on bad values, and
+on the heartbeat going quiet.
+
+```json
+"heartbeat": {
+  "url": "https://<your influx endpoint>/api/v1/push/influx/write",
+  "format": "influx",
+  "basicUser": "<instance id>",
+  "passwordFile": "/home/you/.buzzfleet/heartbeat.token"
+}
+```
+
+- **`json`** (the default) is one document per beat, for any webhook or
+  receiver: load, memory, swap, disk, uptime, and each agent's state, health,
+  uptime and recent restarts.
+- **`influx`** is InfluxDB line protocol, which Grafana Cloud's Mimir ingests
+  as Prometheus series named `<measurement>_<field>`: `buzzfleet_heartbeat_up`,
+  `buzzfleet_host_load1`, `buzzfleet_host_mem_available_bytes`,
+  `buzzfleet_agent_healthy{agent}`, `buzzfleet_agents_ok`, and so on. Each
+  agent's state is an enum, `buzzfleet_agent_state_active{agent,state}`: 1
+  for the current state and 0 for every other on each beat. A state carried
+  as a label would leave the old series answering queries for several
+  minutes after every change.
+  A silence alert is `absent_over_time(buzzfleet_heartbeat_up{host="…"}[5m])`.
+
+Auth is basic (`basicUser` + `passwordFile`) or a bearer token
+(`bearerTokenFile`), and needs https unless the endpoint is on localhost. Logs
+show only the endpoint's scheme and host, because webhook URLs often carry a
+secret in the path or query. Secrets are read from files on every send, so they never
+sit in fleetd.json, and rotating one needs no restart. `intervalSecs` defaults
+to 60.
+
+The heartbeat does not wait on the relay. It reports the last health pass with
+its age (`assessed_seconds_ago`) and whether the relay answered (`relay_ok`).
+So "host fine, relay down" is a different alert from silence.
+
+```bash
+buzzfleet heartbeat          # print the body that would be sent
+buzzfleet heartbeat --send   # send one now and report the response
+```
+
 ## Layout
 
 ```

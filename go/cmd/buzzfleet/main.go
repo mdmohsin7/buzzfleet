@@ -30,6 +30,7 @@ const usage = `buzzfleet — run and supervise Buzz agents on this machine
   doctor                        duplicates, permissions, membership
   reap [--dry-run]              kill harnesses systemd is not supervising
   limits [--apply]              cap the CPU and memory all agents can use
+  heartbeat [--send]            show, or send once, the out-of-band heartbeat
   add <name> --workdir <path> --invite <code> [--display-name "..."]
        [--prompt "..." | --prompt-file <path>]
                                 provision a new agent end to end
@@ -103,6 +104,8 @@ func main() {
 		cmdReap(h, args)
 	case "limits":
 		cmdLimits(h, args)
+	case "heartbeat":
+		cmdHeartbeat(h, args)
 	case "channels":
 		cmdChannels(h, args)
 	case "join":

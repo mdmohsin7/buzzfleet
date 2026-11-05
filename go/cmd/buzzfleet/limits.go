@@ -70,6 +70,11 @@ func cmdLimits(h *host.Host, args []string) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		die("%s failed: %v\n%s", t, err, strings.TrimSpace(string(out)))
 	}
+	if t.System && mode != fleet.CgroupUnified {
+		if err := placeV1(os.Getuid()); err != nil {
+			die("%v", err)
+		}
+	}
 	fmt.Println("\napplied. What the kernel now enforces:")
 	for _, line := range enforcementLines(h, mode, t) {
 		fmt.Println("  " + line.msg)
@@ -119,4 +124,35 @@ func mib(bytes string) string {
 		return bytes
 	}
 	return fmt.Sprint(b >> 20)
+}
+
+// placeV1 moves the user manager's running processes under the new limit,
+// and fails loudly if it cannot show they all are. On v1, systemd sets the
+// limit but leaves running processes where they were.
+func placeV1(uid int) error {
+	unit := host.UserManagerPath(uid)
+	mgr := strings.TrimSpace(func() string {
+		out, _ := exec.Command("systemctl", "show", "-p", "MainPID", "--value", fmt.Sprintf("user@%d.service", uid)).Output()
+		return string(out)
+	}())
+	if mgr == "" || mgr == "0" {
+		return fmt.Errorf("cannot find the user manager's pid for user@%d.service, so the ceiling's placement cannot be checked", uid)
+	}
+	run := func(argv []string) error {
+		if out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput(); err != nil {
+			return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	}
+	moved, err := host.PlaceV1(host.CgroupRoot, host.ProcRoot, unit, mgr, run)
+	if err != nil {
+		return fmt.Errorf("the limit is set, but %v.\n"+
+			"Run `buzzfleet limits --apply` again, or `sudo systemctl restart user@%d.service`, which stops every agent at once.", err, uid)
+	}
+	for _, c := range host.V1Controllers {
+		if moved[c] > 0 {
+			fmt.Printf("moved %d running process(es) into the %s cgroup the limit lives in\n", moved[c], c)
+		}
+	}
+	return nil
 }

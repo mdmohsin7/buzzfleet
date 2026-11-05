@@ -113,3 +113,106 @@ func TestV1MigrateScriptSkipsVanishedPids(t *testing.T) {
 		t.Fatalf("got %q", b)
 	}
 }
+
+// fakeRun stands in for sudo: it "moves" each pid by rewriting the
+// controller's line in its fake /proc/<pid>/cgroup. skip pids stay put.
+func fakeRun(t *testing.T, root, proc string, skip map[string]bool, after func(call int)) (func([]string) error, *int) {
+	calls := 0
+	return func(argv []string) error {
+		calls++
+		target := argv[6]
+		ctrl := "memory"
+		if strings.Contains(target, "cpu") {
+			ctrl = "cpu,cpuacct"
+		}
+		for _, pid := range argv[7:] {
+			if skip[pid] {
+				continue
+			}
+			p := filepath.Join(proc, pid, "cgroup")
+			b, err := os.ReadFile(p)
+			if err != nil {
+				continue
+			}
+			var lines []string
+			for _, l := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+				if parts := strings.SplitN(l, ":", 3); len(parts) == 3 && parts[1] == ctrl {
+					l = parts[0] + ":" + ctrl + ":" + unit
+				}
+				lines = append(lines, l)
+			}
+			put(t, p, strings.Join(lines, "\n")+"\n")
+		}
+		if after != nil {
+			after(calls)
+		}
+		return nil
+	}, &calls
+}
+
+func TestPlaceV1MovesEveryProcess(t *testing.T) {
+	root, proc := fakeV1(t)
+	run, _ := fakeRun(t, root, proc, nil, nil)
+	moved, err := PlaceV1(root, proc, unit, "100", run)
+	if err != nil || moved["cpu"] != 3 || moved["memory"] != 0 {
+		t.Fatalf("moved=%v err=%v", moved, err)
+	}
+	if mis, _ := V1Misplaced(root, proc, unit); len(mis["cpu"]) != 0 {
+		t.Fatalf("still misplaced: %v", mis)
+	}
+}
+
+func TestPlaceV1FailsWhenAProcessStaysOutside(t *testing.T) {
+	root, proc := fakeV1(t)
+	run, _ := fakeRun(t, root, proc, map[string]bool{"201": true}, nil)
+	_, err := PlaceV1(root, proc, unit, "100", run)
+	if err == nil || !strings.Contains(err.Error(), "201") || !strings.Contains(err.Error(), "does NOT cover") {
+		t.Fatalf("a process left outside must fail, naming it: %v", err)
+	}
+}
+
+func TestPlaceV1FailsWithoutATargetCgroup(t *testing.T) {
+	root, proc := fakeV1(t)
+	os.RemoveAll(filepath.Join(root, "cpu,cpuacct"))
+	run, calls := fakeRun(t, root, proc, nil, nil)
+	if _, err := PlaceV1(root, proc, unit, "100", run); err == nil || !strings.Contains(err.Error(), "made no cpu cgroup") {
+		t.Fatalf("got %v", err)
+	}
+	if *calls != 0 {
+		t.Fatal("nothing must be written when there is nowhere to write it")
+	}
+}
+
+func TestPlaceV1FailsOnAnEmptyProcessList(t *testing.T) {
+	root, proc := t.TempDir(), t.TempDir()
+	put(t, filepath.Join(root, "systemd", unit, "cgroup.procs"), "")
+	put(t, filepath.Join(root, "cpu,cpuacct", unit, "cgroup.procs"), "")
+	run, _ := fakeRun(t, root, proc, nil, nil)
+	if _, err := PlaceV1(root, proc, unit, "100", run); err == nil || !strings.Contains(err.Error(), "no processes") {
+		t.Fatalf("nothing to check is not success: %v", err)
+	}
+}
+
+func TestPlaceV1RequiresTheUserManager(t *testing.T) {
+	root, proc := fakeV1(t)
+	run, _ := fakeRun(t, root, proc, nil, nil)
+	if _, err := PlaceV1(root, proc, unit, "999", run); err == nil || !strings.Contains(err.Error(), "user manager (pid 999)") {
+		t.Fatalf("a manager outside its own unit means an unexpected layout: %v", err)
+	}
+}
+
+func TestPlaceV1CatchesAForkOnTheSecondPass(t *testing.T) {
+	root, proc := fakeV1(t)
+	// A process forked during the first move: in the unit, but still in
+	// cpu:/user.slice, inheriting from a parent that had not moved yet.
+	run, calls := fakeRun(t, root, proc, nil, func(call int) {
+		if call == 1 {
+			put(t, filepath.Join(root, "systemd", unit, "buzzfleetd.service", "cgroup.procs"), "300\n400\n")
+			put(t, filepath.Join(proc, "400", "cgroup"), "12:memory:"+unit+"\n9:cpu,cpuacct:/user.slice\n")
+		}
+	})
+	moved, err := PlaceV1(root, proc, unit, "100", run)
+	if err != nil || moved["cpu"] != 4 || *calls != 2 {
+		t.Fatalf("moved=%v calls=%d err=%v", moved, *calls, err)
+	}
+}

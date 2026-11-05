@@ -95,7 +95,7 @@ func inController(procCgroup, controller, unitPath string) bool {
 func V1MigrateCommand(root, controller, unitPath string, pids []string) []string {
 	target := filepath.Join(controllerDir(root, controller), unitPath, "cgroup.procs")
 	return append([]string{"sudo", "-n", "sh", "-c",
-		`f=$1; shift; for p; do echo "$p" > "$f" 2>/dev/null || true; done`, "sh", target}, pids...)
+		`f=$1; shift; for p; do echo "$p" 2>/dev/null > "$f" || true; done`, "sh", target}, pids...)
 }
 
 // V1TargetExists reports whether systemd created the unit's cgroup in a
@@ -115,3 +115,75 @@ const (
 	CgroupRoot = cgroupRoot
 	ProcRoot   = "/proc"
 )
+
+// PlaceV1 moves a unit's running processes into its cgroups in every v1
+// controller and verifies the result. It errors, rather than reporting success,
+// whenever it cannot show that every process is placed: an empty process list,
+// a user manager missing from its own unit or left outside, a controller with
+// no cgroup to move into, or any process still outside after two passes.
+//
+// managerPid is the user manager itself: where it sits decides where everything
+// it starts later lands. run executes a command (sudo, in production).
+func PlaceV1(root, procRoot, unit, managerPid string, run func(argv []string) error) (map[string]int, error) {
+	moved := map[string]int{}
+	for pass := 0; pass < 2; pass++ {
+		pids, err := UnitPids(root, unit)
+		if err != nil {
+			return moved, fmt.Errorf("cannot list the processes of %s: %w", unit, err)
+		}
+		if len(pids) == 0 {
+			return moved, fmt.Errorf("found no processes in %s under the systemd hierarchy, so their placement cannot be checked; the ceiling may cover nothing", unit)
+		}
+		if managerPid != "" && !contains(pids, managerPid) {
+			return moved, fmt.Errorf("the user manager (pid %s) is not among the processes of %s; this host's cgroup layout is not what buzzfleet expects, so the ceiling may cover nothing", managerPid, unit)
+		}
+		mis, err := V1Misplaced(root, procRoot, unit)
+		if err != nil {
+			return moved, err
+		}
+		for _, c := range V1Controllers {
+			if len(mis[c]) == 0 {
+				continue
+			}
+			if !V1TargetExists(root, c, unit) {
+				return moved, fmt.Errorf("the %s limit is set, but systemd made no %s cgroup for %s, so %d running process(es) are not under it",
+					c, c, unit, len(mis[c]))
+			}
+			if err := run(V1MigrateCommand(root, c, unit, mis[c])); err != nil {
+				return moved, fmt.Errorf("moving processes into the %s cgroup failed: %w", c, err)
+			}
+			moved[c] += len(mis[c])
+		}
+	}
+	mis, err := V1Misplaced(root, procRoot, unit)
+	if err != nil {
+		return moved, fmt.Errorf("cannot verify placement: %w", err)
+	}
+	for _, c := range V1Controllers {
+		if n := len(mis[c]); n > 0 {
+			return moved, fmt.Errorf("%d process(es) of %s are still outside its %s cgroup (pids %s), so the ceiling does NOT cover them",
+				n, unit, c, strings.Join(mis[c], " "))
+		}
+	}
+	if managerPid != "" {
+		b, err := os.ReadFile(filepath.Join(procRoot, managerPid, "cgroup"))
+		if err != nil {
+			return moved, fmt.Errorf("cannot read the user manager's cgroups: %w", err)
+		}
+		for _, c := range V1Controllers {
+			if !inController(string(b), c, unit) {
+				return moved, fmt.Errorf("the user manager (pid %s) is outside its %s cgroup, so agents it starts later will not be capped", managerPid, c)
+			}
+		}
+	}
+	return moved, nil
+}
+
+func contains(list []string, v string) bool {
+	for _, x := range list {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}

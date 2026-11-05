@@ -126,45 +126,30 @@ func mib(bytes string) string {
 	return fmt.Sprint(b >> 20)
 }
 
-// placeV1 moves the user manager's running processes into the cgroups the new
-// limit lives in, and fails loudly if any are left outside. On v1, systemd sets
-// the limit on the unit's cgroup but leaves running processes where they were,
-// so without this `limits --apply` reports success and caps nothing.
+// placeV1 moves the user manager's running processes under the new limit,
+// and fails loudly if it cannot show they all are. On v1, systemd sets the
+// limit but leaves running processes where they were.
 func placeV1(uid int) error {
 	unit := host.UserManagerPath(uid)
-	// Two passes: a process forked during the first is caught by the second.
-	moved := map[string]int{}
-	for pass := 0; pass < 2; pass++ {
-		mis, err := host.V1Misplaced(host.CgroupRoot, host.ProcRoot, unit)
-		if err != nil {
-			return fmt.Errorf("cannot list the user manager's processes: %w", err)
-		}
-		for _, c := range host.V1Controllers {
-			if len(mis[c]) == 0 {
-				continue
-			}
-			if !host.V1TargetExists(host.CgroupRoot, c, unit) {
-				return fmt.Errorf("the %s limit is set, but systemd made no %s cgroup for %s, so %d running process(es) are not under it.\n"+
-					"The limit will apply after `sudo systemctl restart user@%d.service`, which stops every agent at once.",
-					c, c, unit, len(mis[c]), uid)
-			}
-			argv := host.V1MigrateCommand(host.CgroupRoot, c, unit, mis[c])
-			if out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput(); err != nil {
-				return fmt.Errorf("moving processes into the %s cgroup failed: %v\n%s", c, err, strings.TrimSpace(string(out)))
-			}
-			moved[c] += len(mis[c])
-		}
+	mgr := strings.TrimSpace(func() string {
+		out, _ := exec.Command("systemctl", "show", "-p", "MainPID", "--value", fmt.Sprintf("user@%d.service", uid)).Output()
+		return string(out)
+	}())
+	if mgr == "" || mgr == "0" {
+		return fmt.Errorf("cannot find the user manager's pid for user@%d.service, so the ceiling's placement cannot be checked", uid)
 	}
-	mis, err := host.V1Misplaced(host.CgroupRoot, host.ProcRoot, unit)
+	run := func(argv []string) error {
+		if out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput(); err != nil {
+			return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	}
+	moved, err := host.PlaceV1(host.CgroupRoot, host.ProcRoot, unit, mgr, run)
 	if err != nil {
-		return fmt.Errorf("cannot verify placement: %w", err)
+		return fmt.Errorf("the limit is set, but %v.\n"+
+			"Run `buzzfleet limits --apply` again, or `sudo systemctl restart user@%d.service`, which stops every agent at once.", err, uid)
 	}
 	for _, c := range host.V1Controllers {
-		if n := len(mis[c]); n > 0 {
-			return fmt.Errorf("the limit is set, but %d process(es) of %s are still outside its %s cgroup (pids %s), so the ceiling does NOT cover them.\n"+
-				"Run `buzzfleet limits --apply` again, or `sudo systemctl restart user@%d.service`, which stops every agent at once.",
-				n, unit, c, strings.Join(mis[c], " "), uid)
-		}
 		if moved[c] > 0 {
 			fmt.Printf("moved %d running process(es) into the %s cgroup the limit lives in\n", moved[c], c)
 		}

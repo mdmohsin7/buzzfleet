@@ -129,6 +129,16 @@ func ClampContainer(kind string, body []byte, l Limits, agent string, now int64)
 		fields[k] = v
 	}
 
+	// A negative value means "unlimited" to dockerd, on update as well as
+	// create, and it is honoured even on a container capped in another form:
+	// CpuQuota -1 on a NanoCpus container writes "max" to the cgroup. Nothing
+	// legitimate needs an agent to lift its own cap, so these are refused.
+	for _, k := range []string{"NanoCpus", "CpuQuota", "CpuPeriod", "Memory"} {
+		if fields[k] != nil && num(fields[k]) < 0 {
+			return nil, nil, fmt.Errorf("%s %d would lift the cap; buzzfleet does not allow unlimited containers", k, num(fields[k]))
+		}
+	}
+
 	var changes []string
 	note := func(f string, a ...any) { changes = append(changes, fmt.Sprintf(f, a...)) }
 
@@ -170,9 +180,16 @@ func ClampContainer(kind string, body []byte, l Limits, agent string, now int64)
 			mem = capMem
 		}
 		// Swap is memory+swap in Docker's terms. Unlimited swap turns a memory
-		// cap into a disk-thrashing one, which on a small box is worse.
-		if mem > 0 && fields["MemorySwap"] != nil {
-			if v := num(fields["MemorySwap"]); v == -1 || v > 2*mem || (v > 0 && v < mem) {
+		// cap into a disk-thrashing one, which on a small box is worse. An
+		// update may set swap alone; bound it by the cap then.
+		known := mem > 0
+		if !known {
+			mem = capMem
+		}
+		if fields["MemorySwap"] != nil {
+			// Raising swap to match memory is only right when the memory is
+			// known; otherwise a small container's swap would be raised.
+			if v := num(fields["MemorySwap"]); v < 0 || v > 2*mem || (known && v > 0 && v < mem) {
 				res["MemorySwap"] = 2 * mem
 				note("memory+swap %d -> %dM", v, (2*mem)>>20)
 			}

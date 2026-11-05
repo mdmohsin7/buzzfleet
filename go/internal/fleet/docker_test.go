@@ -190,3 +190,38 @@ func TestClampRefusesMalformedBodies(t *testing.T) {
 		}
 	}
 }
+
+func TestUpdateCannotLiftTheCapWithNegativeValues(t *testing.T) {
+	// dockerd reads -1 as unlimited, even on a container capped with
+	// NanoCpus, and writes "max" to the cgroup.
+	for _, body := range []string{
+		`{"CpuQuota":-1}`,
+		`{"cpuQuota":-1}`,
+		`{"CpuQuota":-1,"CpuPeriod":100000}`,
+		`{"NanoCpus":-1}`,
+		`{"Memory":-1}`,
+	} {
+		if _, _, err := ClampContainer("update", []byte(body), testCaps, "agent-a", 1); err == nil {
+			t.Fatalf("update %s must be refused", body)
+		}
+	}
+	if _, _, err := ClampContainer("create", []byte(`{"HostConfig":{"CpuQuota":-1}}`), testCaps, "agent-a", 1); err == nil {
+		t.Fatal("create with an unlimited quota must be refused")
+	}
+	// The CLI sends zeroes for everything it was not asked to change.
+	if _, _, err := ClampContainer("update", []byte(`{"CpuQuota":0,"NanoCpus":0,"Memory":0,"CpuPeriod":0}`), testCaps, "agent-a", 1); err != nil {
+		t.Fatalf("zeroes mean unchanged: %v", err)
+	}
+}
+
+func TestUpdateSwapAloneIsBounded(t *testing.T) {
+	doc, _ := clamp(t, "update", `{"MemorySwap":-1}`)
+	if doc["MemorySwap"].(float64) != 2*(3072<<20) {
+		t.Fatalf("swap: %v", doc)
+	}
+	// Memory unknown: a small swap stays small.
+	doc, _ = clamp(t, "update", `{"MemorySwap":209715200}`)
+	if doc["MemorySwap"].(float64) != 209715200 {
+		t.Fatalf("swap must not be raised without knowing memory: %v", doc)
+	}
+}

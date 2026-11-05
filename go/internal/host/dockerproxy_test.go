@@ -137,14 +137,18 @@ func TestProxySocketIsPrivate(t *testing.T) {
 func TestProxyRefusesWhatItCannotRead(t *testing.T) {
 	sock, got := startProxy(t)
 	big := `{"Image":"x","Env":["` + strings.Repeat("a", maxRewriteBody) + `"],"HostConfig":{"Memory":8589934592}}`
-	for name, body := range map[string]string{"oversized": big, "malformed": `{"HostConfig":`} {
+	for name, c := range map[string]struct {
+		body   string
+		status int
+	}{"oversized": {big, http.StatusRequestEntityTooLarge}, "malformed": {`{"HostConfig":`, http.StatusBadRequest}} {
+		body := c.body
 		resp, err := unixClient(sock).Post("http://docker/v1.47/containers/create", "application/json", strings.NewReader(body))
 		if err != nil {
 			t.Fatal(err)
 		}
 		resp.Body.Close()
-		if resp.StatusCode < 400 {
-			t.Fatalf("%s: status %d, the request must not reach dockerd", name, resp.StatusCode)
+		if resp.StatusCode != c.status {
+			t.Fatalf("%s: status %d, want %d", name, resp.StatusCode, c.status)
 		}
 		select {
 		case <-got:

@@ -55,7 +55,7 @@ func TestPlanLimitsUsesUserSliceWhenDelegated(t *testing.T) {
 }
 
 func TestPlanLimitsOnV1CapsTheUserManager(t *testing.T) {
-	// A 20.04-era host: hybrid hierarchy, nothing delegated. A CPUQuota on the
+	// An older host: hybrid hierarchy, nothing delegated. A CPUQuota on the
 	// user slice would be accepted and silently ignored.
 	for _, mode := range []CgroupMode{CgroupHybrid, CgroupLegacy} {
 		tg := PlanLimits(mode, nil, 1000, SizeLimits(2, 12000, LimitsConfig{}))

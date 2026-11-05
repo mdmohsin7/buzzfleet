@@ -137,7 +137,7 @@ containers  1 CPU and 3000M memory each, via the supervisor's Docker proxy
   agents. No root needed. Units installed before the template named its slice
   sit elsewhere: `buzzfleet install --force`, then restart the agents (`doctor`
   lists them).
-- **cgroup v1, or v2 without delegation** (Ubuntu 20.04 and older): on the
+- **cgroup v1, or v2 without delegation** (older distributions): on the
   system unit `user@UID.service`, with sudo. That holds every user unit, the
   supervisor included, but not SSH sessions, so a saturated fleet still cannot
   lock you out. Per-agent limits cannot work here at all: systemd accepts a

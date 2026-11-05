@@ -1,6 +1,7 @@
 package fleet
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -60,28 +61,49 @@ func TestClaudeRecordsClassified(t *testing.T) {
 	}
 }
 
-func TestCodexOnlyTrustsItsOwnErrorEvents(t *testing.T) {
-	ok := `{"timestamp":"2026-01-10T12:00:00.000Z","type":"event_msg","payload":{"type":"task_complete"}}`
-	limit := `{"timestamp":"2026-01-10T12:01:00.000Z","type":"event_msg","payload":{"type":"error","message":"You've hit your usage limit. Try again in 2 days 3 hours.","codex_error_info":"usage_limit_exceeded"}}`
-	auth := `{"timestamp":"2026-01-10T12:02:00.000Z","type":"event_msg","payload":{"type":"error","message":"unexpected status 401 Unauthorized","codex_error_info":"unauthorized"}}`
-	authText := `{"timestamp":"2026-01-10T12:02:00.000Z","type":"event_msg","payload":{"type":"error","message":"Your refresh token has expired. Please sign in again."}}`
-	other := `{"timestamp":"2026-01-10T12:03:00.000Z","type":"event_msg","payload":{"type":"error","message":"stream disconnected","codex_error_info":{"http_connection_failed":{"http_status_code":502}}}}`
-	// What the agent's own tools print. Real rollouts are full of these.
-	toolOutput := `{"timestamp":"2026-01-10T12:04:00.000Z","type":"response_item","payload":{"type":"function_call_output","output":"curl: 401 Unauthorized"}}`
+func codexUsage(used float64, extra string) string {
+	return `{"timestamp":"2026-01-10T12:00:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{},` +
+		`"rate_limits":{"primary":{"used_percent":` + strconv.FormatFloat(used, 'f', -1, 64) + `,"window_minutes":300,"resets_at":1768060800},` +
+		`"secondary":null,"credits":{"has_credits":false,"unlimited":false,"balance":"0"},"rate_limit_reached_type":null` + extra + `}}}`
+}
 
-	for line, want := range map[string]SignalKind{ok: SigOK, limit: SigLimited, auth: SigAuth, authText: SigAuth} {
-		if s, _ := ParseCodexLine([]byte(line)); s.Kind != want {
-			t.Fatalf("%s: got %d want %d", line, s.Kind, want)
-		}
+func TestCodexLimitsComeFromTheUsageSnapshot(t *testing.T) {
+	s, ok := ParseCodexLine([]byte(codexUsage(97, "")))
+	if !ok || s.Kind != SigOK {
+		t.Fatalf("97%% used: the model answered, got %+v", s)
 	}
-	for _, line := range []string{other, toolOutput} {
+	s, ok = ParseCodexLine([]byte(codexUsage(100, "")))
+	if !ok || s.Kind != SigLimited || !s.Resets.Equal(time.Unix(1768060800, 0)) {
+		t.Fatalf("100%% used: limited until the window resets, got %+v", s)
+	}
+	reached := strings.Replace(codexUsage(40, ""), `"rate_limit_reached_type":null`, `"rate_limit_reached_type":"usage_limit_reached"`, 1)
+	if s, _ := ParseCodexLine([]byte(reached)); s.Kind != SigLimited {
+		t.Fatalf("a reached-limit marker is limited whatever the percentage: %+v", s)
+	}
+	credits := strings.Replace(codexUsage(100, ""), `"has_credits":false`, `"has_credits":true`, 1)
+	if s, _ := ParseCodexLine([]byte(credits)); s.Kind != SigOK {
+		t.Fatalf("past 100%% with credits the account carries on: %+v", s)
+	}
+}
+
+func TestCodexIgnoresTurnEndsAndToolOutput(t *testing.T) {
+	for _, line := range []string{
+		// Written after failed turns too, so it proves nothing.
+		`{"timestamp":"2026-01-10T12:00:00.000Z","type":"event_msg","payload":{"type":"task_complete"}}`,
+		// Never persisted by Codex, but must not be trusted if it ever is.
+		`{"timestamp":"2026-01-10T12:01:00.000Z","type":"event_msg","payload":{"type":"error","message":"401 Unauthorized"}}`,
+		`{"timestamp":"2026-01-10T12:04:00.000Z","type":"response_item","payload":{"type":"function_call_output","output":"curl: 401 Unauthorized"}}`,
+		// A token count with no usage snapshot says nothing about the account.
+		`{"timestamp":"2026-01-10T12:05:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{}}}`,
+	} {
 		if _, ok := ParseCodexLine([]byte(line)); ok {
 			t.Fatalf("must not be a signal: %s", line)
 		}
 	}
-	s, _ := ParseCodexLine([]byte(limit))
-	if want := time.Date(2026, 1, 12, 15, 1, 0, 0, time.UTC); !s.Resets.Equal(want) {
-		t.Fatalf("reset %v want %v", s.Resets, want)
+	// Limited, then the turn "completes": still limited.
+	lim, _ := ParseCodexLine([]byte(codexUsage(100, "")))
+	if st, _ := InferenceState(Latest([]Signal{lim}), lim.At.Add(time.Minute)); st != StateLimited {
+		t.Fatalf("got %s", st)
 	}
 }
 
@@ -190,9 +212,11 @@ func TestInferenceNoticesGroupedAndOnce(t *testing.T) {
 	}
 
 	rows[0], rows[1] = Assessment{Name: "agent-a", State: StateOK}, Assessment{Name: "agent-b", State: StateOK}
+	rows[2] = WithInference(Assessment{Name: "agent-c", State: StateOK}, StateOK, "limit should have reset at Jan 12 22:00 UTC")
 	n, state := InferenceNotices("host-1", state, rows)
-	if len(n) != 1 || !strings.Contains(n[0], "**agent-a**, **agent-b** are answering normally again") {
-		t.Fatalf("got %q", n)
+	if len(n) != 2 || !strings.Contains(n[0], "**agent-c** is past its usage reset") ||
+		!strings.Contains(n[1], "**agent-a**, **agent-b** are answering normally again") {
+		t.Fatalf("a reset with no turn since is not a recovery: %q", n)
 	}
 	if _, still := state["agent-a"]; still {
 		t.Fatal("recovered agents leave the state")

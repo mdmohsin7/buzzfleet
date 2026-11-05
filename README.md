@@ -116,8 +116,8 @@ and the latest turn decides:
 
 | state | meaning |
 |---|---|
-| `auth` | the model provider rejected the agent's login (401 / authentication_failed) |
-| `limited` | the account hit a usage limit (429 / rate_limit), shown with its reset time when the provider gave one |
+| `auth` | the model provider rejected the agent's login (401 / authentication_failed). Claude Code only: Codex leaves no record of an auth failure |
+| `limited` | the account hit a usage limit (429 / rate_limit), shown with its reset time when the provider gave one. For Codex, read from the usage snapshot it records with each token count: a window at 100% (without credits) or a reached-limit marker |
 
 Neither is ever restarted, because a restart fixes neither. The supervisor
 says so once in the channel, naming every agent that went down for the same
@@ -128,8 +128,13 @@ host-1 — agent-a, agent-b, agent-c are out of model usage (usage limit until J
 Every turn is failing, so I am not restarting them: a restart does not fix this.
 ```
 
-The state clears on the agent's next good turn, or for a limit with a known
-reset, when the reset passes. It says once when they are answering again.
+The state clears on the agent's next good turn. A limit with a known reset is
+also assumed lifted once the reset passes; the supervisor says the agent
+"should work again" rather than that it recovered, since nothing has run yet.
+
+Transcripts are matched to agents by workdir. Claude Code's directory names
+turn both `/` and `-` into `-`, so `/srv/agent/b` and `/srv/agent-b` look the
+same; give agents workdirs that do not nest inside each other's names.
 Only the coding agent's own error records count: a `401` printed by a command
 the agent ran is not its credentials failing.
 

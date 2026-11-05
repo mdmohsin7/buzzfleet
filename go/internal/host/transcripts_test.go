@@ -3,6 +3,7 @@ package host
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -66,7 +67,8 @@ func TestCodexSignalsMatchedOnSessionCwd(t *testing.T) {
 	meta := func(cwd string) string {
 		return `{"timestamp":"` + ts + `","type":"session_meta","payload":{"cwd":"` + cwd + `"}}`
 	}
-	limit := `{"timestamp":"` + ts + `","type":"event_msg","payload":{"type":"error","message":"usage limit","codex_error_info":"usage_limit_exceeded"}}`
+	limit := `{"timestamp":"` + ts + `","type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":100,"resets_at":` +
+		strconv.FormatInt(now.Add(time.Hour).Unix(), 10) + `}}}}`
 	tool := `{"timestamp":"` + ts + `","type":"response_item","payload":{"type":"function_call_output","output":"HTTP 401 Unauthorized"}}`
 
 	write(t, filepath.Join(day, "rollout-a.jsonl"), now, meta("/srv/agent-b/repo"), limit)

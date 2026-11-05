@@ -44,7 +44,6 @@ type Signal struct {
 
 var (
 	limitTextRe = regexp.MustCompile(`(?i)hit your [a-z ]*limit|usage limit|spend limit|rate.?limit`)
-	authTextRe  = regexp.MustCompile(`(?i)oauth|log ?in again|sign in again|/login|refresh token|unauthori[sz]ed|invalid api key|authenticat`)
 )
 
 // claudeRecord is the part of a Claude Code transcript line that matters.
@@ -121,51 +120,67 @@ type codexRecord struct {
 	Timestamp string `json:"timestamp"`
 	Type      string `json:"type"`
 	Payload   struct {
-		Type           string          `json:"type"`
-		Message        string          `json:"message"`
-		CodexErrorInfo json.RawMessage `json:"codex_error_info"`
+		Type       string `json:"type"`
+		RateLimits *struct {
+			Primary              *codexWindow `json:"primary"`
+			Secondary            *codexWindow `json:"secondary"`
+			RateLimitReachedType *string      `json:"rate_limit_reached_type"`
+			Credits              *struct {
+				HasCredits bool `json:"has_credits"`
+				Unlimited  bool `json:"unlimited"`
+			} `json:"credits"`
+		} `json:"rate_limits"`
 	} `json:"payload"`
+}
+
+type codexWindow struct {
+	UsedPercent float64 `json:"used_percent"`
+	ResetsAt    int64   `json:"resets_at"` // unix seconds
 }
 
 // ParseCodexLine reads one line of a Codex session rollout.
 //
-// Only Codex's own error events count. Tool output in the same file is full of
-// "401 Unauthorized" from whatever the agent was running, and must never be
-// read as the agent's own credentials failing.
+// Codex does not write its error events to the rollout, and it records every
+// turn as task_complete, failed or not, so neither says whether a turn worked.
+// What it does persist is a usage snapshot with each token count: how much of
+// each rate-limit window is used and when that window resets. A window at 100%,
+// or a reached-limit marker, means the account is out, until the reset. Any
+// other snapshot means the model just answered. Codex auth failures leave no
+// record at all, so they cannot be detected here.
+//
+// Tool output in the same file is full of "401 Unauthorized" from commands the
+// agent ran; only these structured records are read.
 func ParseCodexLine(line []byte) (Signal, bool) {
 	var r codexRecord
-	if json.Unmarshal(line, &r) != nil || r.Type != "event_msg" {
+	if json.Unmarshal(line, &r) != nil || r.Type != "event_msg" || r.Payload.Type != "token_count" || r.Payload.RateLimits == nil {
 		return Signal{}, false
 	}
 	at, err := time.Parse(time.RFC3339Nano, r.Timestamp)
 	if err != nil {
 		return Signal{}, false
 	}
-	switch r.Payload.Type {
-	case "task_complete":
+	rl := r.Payload.RateLimits
+	var resets int64
+	out := rl.RateLimitReachedType != nil && *rl.RateLimitReachedType != ""
+	for _, w := range []*codexWindow{rl.Primary, rl.Secondary} {
+		if w != nil && w.UsedPercent >= 100 {
+			out = true
+			resets = max(resets, w.ResetsAt)
+		}
+	}
+	// Past 100% an account with credits carries on, paying for it.
+	if out && rl.Credits != nil && (rl.Credits.HasCredits || rl.Credits.Unlimited) && (rl.RateLimitReachedType == nil || *rl.RateLimitReachedType == "") {
+		out = false
+	}
+	if !out {
 		return Signal{At: at, Kind: SigOK}, true
-	case "error":
-	default:
-		return Signal{}, false
 	}
-	// codex_error_info is a bare string for simple cases and an object for
-	// ones that carry data; either way its name is what classifies it.
-	info := strings.ToLower(string(r.Payload.CodexErrorInfo))
-	s := Signal{At: at, Text: r.Payload.Message}
-	switch {
-	case strings.Contains(info, "usage_limit"):
-		s.Kind = SigLimited
-	case strings.Contains(info, "unauthorized"):
-		s.Kind = SigAuth
-	case limitTextRe.MatchString(s.Text):
-		s.Kind = SigLimited
-	case authTextRe.MatchString(s.Text):
-		s.Kind = SigAuth
-	default:
-		return Signal{}, false
+	s := Signal{At: at, Kind: SigLimited, Text: "Codex usage limit reached"}
+	if rl.RateLimitReachedType != nil && *rl.RateLimitReachedType != "" {
+		s.Text = "Codex usage limit reached (" + *rl.RateLimitReachedType + ")"
 	}
-	if s.Kind == SigLimited {
-		s.Resets, _ = ParseReset(s.Text, at)
+	if resets > 0 {
+		s.Resets = time.Unix(resets, 0).UTC()
 	}
 	return s, true
 }
@@ -256,7 +271,8 @@ func InferenceState(s Signal, now time.Time) (State, string) {
 		return StateAuth, "model login failed: " + firstLine(s.Text)
 	case SigLimited:
 		if !s.Resets.IsZero() && now.After(s.Resets) {
-			return StateOK, ""
+			// Assumed, not shown: no turn has run since the reset.
+			return StateOK, "limit should have reset at " + s.Resets.UTC().Format("Jan 2 15:04 UTC")
 		}
 		d := "usage limit: " + firstLine(s.Text)
 		if !s.Resets.IsZero() {
@@ -282,8 +298,15 @@ func firstLine(s string) string {
 // because a restart fixes the wedge. A healthy-looking agent whose turns are
 // all failing is what this exists to expose.
 func WithInference(a Assessment, st State, detail string) Assessment {
-	if a.State == StateOK && (st == StateAuth || st == StateLimited) {
+	if a.State != StateOK {
+		return a
+	}
+	switch {
+	case st == StateAuth || st == StateLimited:
 		a.State, a.Detail = st, detail
+	case detail != "":
+		a.Detail += "; " + detail
+		a.LimitAssumedLifted = true
 	}
 	return a
 }
@@ -298,7 +321,7 @@ func InferenceNotices(host string, prev map[string]string, now []Assessment) (no
 	next = map[string]string{}
 	groups := map[string][]string{}
 	var order []string
-	var recovered []string
+	var recovered, reset []string
 	for _, a := range now {
 		cur := ""
 		if a.State == StateAuth || a.State == StateLimited {
@@ -315,7 +338,9 @@ func InferenceNotices(host string, prev map[string]string, now []Assessment) (no
 		case cur == "" && had:
 			// Only a real recovery: an agent that went down or vanished has
 			// not been shown to work again.
-			if a.State == StateOK {
+			if a.State == StateOK && a.LimitAssumedLifted {
+				reset = append(reset, a.Name)
+			} else if a.State == StateOK {
 				recovered = append(recovered, a.Name)
 			} else {
 				next[a.Name] = was
@@ -337,6 +362,11 @@ func InferenceNotices(host string, prev map[string]string, now []Assessment) (no
 		notices = append(notices, fmt.Sprintf(
 			"**%s** — %s %s (%s). Every turn is failing, so I am not restarting %s: a restart does not fix this. %s",
 			host, boldList(names), what, detail, pick(plural, "them", "it"), fix))
+	}
+	if len(reset) > 0 {
+		// Nothing has run since, so this is a forecast, not a recovery.
+		notices = append(notices, fmt.Sprintf("**%s** — %s %s past %s usage reset, so %s should work again. If not, the next turn will say so.",
+			host, boldList(reset), pick(len(reset) > 1, "are", "is"), pick(len(reset) > 1, "their", "its"), pick(len(reset) > 1, "they", "it")))
 	}
 	if len(recovered) > 0 {
 		notices = append(notices, fmt.Sprintf("**%s** — %s %s answering normally again.",
@@ -367,7 +397,9 @@ func ClaudeSlug(dir string) string {
 // ClaudeProjectOwner says which workdir a Claude project directory belongs to:
 // the workdir itself, or a directory below it. The slug loses the difference
 // between "/" and "-", so /srv/agent and /srv/agent-b both prefix-match
-// "-srv-agent-b-repo"; the longest match is the one that owns it.
+// "-srv-agent-b-repo"; the longest match is the one that owns it. The loss
+// cannot be undone: /srv/agent/b and /srv/agent-b produce the same slug, so a
+// repo at /srv/agent/b is credited to an agent whose workdir is /srv/agent-b.
 func ClaudeProjectOwner(project string, workdirs []string) string {
 	best, bestLen := "", -1
 	for _, w := range workdirs {

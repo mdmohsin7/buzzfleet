@@ -171,7 +171,10 @@ containers  1 CPU and 3000M memory each, via the supervisor's Docker proxy
   system unit `user@UID.service`, with sudo. That holds every user unit, the
   supervisor included, but not SSH sessions, so a saturated fleet still cannot
   lock you out. Per-agent limits cannot work here at all: systemd accepts a
-  `MemoryMax=` in an agent's drop-in and silently ignores it.
+  `MemoryMax=` in an agent's drop-in and silently ignores it. On v1, systemd
+  also leaves already-running processes outside a newly enabled cpu cgroup, so
+  `--apply` moves them in itself, the user manager included, and fails
+  loudly, listing the pids, if any are left outside.
 
 Because systemd accepts limits it cannot apply, `doctor` reads the kernel's own
 cgroup files for each agent and says which ceiling actually binds:

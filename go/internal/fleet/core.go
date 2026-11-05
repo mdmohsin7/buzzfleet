@@ -30,6 +30,8 @@ type Config struct {
 	HealWindowSecs int `json:"healWindowSecs"`
 
 	NoAutoHeal bool `json:"noAutoHeal"`
+
+	Heartbeat HeartbeatConfig `json:"heartbeat"`
 }
 
 func (c *Config) WithDefaults() *Config {

@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -28,7 +30,7 @@ func (v *fleetView) update(rows []fleet.Assessment, h *host.Host, heals map[stri
 	relayOK := true
 	readings := make([]fleet.AgentReading, 0, len(rows))
 	for _, r := range rows {
-		if r.State == fleet.StateUnknown && r.Detail == "relay unreachable" {
+		if r.State == fleet.StateUnknown && r.Detail == fleet.DetailRelayUnreachable {
 			relayOK = false
 		}
 		var up int64
@@ -102,6 +104,12 @@ func sendHeartbeat(c fleet.HeartbeatConfig, body []byte, contentType string) err
 	}
 	resp, err := heartbeatClient.Do(req)
 	if err != nil {
+		// url.Error quotes the whole URL, and webhook secrets often live in
+		// its path or query. Keep the cause, drop the URL.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			return fmt.Errorf("%s %s: %w", ue.Op, redactURL(c.URL), ue.Err)
+		}
 		return err
 	}
 	defer resp.Body.Close()
@@ -167,14 +175,14 @@ func formatName(c fleet.HeartbeatConfig) string {
 	return c.Format
 }
 
-// redactURL keeps credentials someone put in the URL out of the journal.
+// redactURL reduces a URL to scheme and host for logs. Webhook receivers put
+// secrets in userinfo, the path (/hooks/<token>) or the query (?token=).
 func redactURL(u string) string {
-	if i := strings.Index(u, "://"); i >= 0 {
-		if j := strings.Index(u[i+3:], "@"); j >= 0 {
-			return u[:i+3] + "…@" + u[i+3+j+1:]
-		}
+	p, err := url.Parse(u)
+	if err != nil || p.Host == "" {
+		return "(heartbeat url)"
 	}
-	return u
+	return p.Scheme + "://" + p.Host
 }
 
 // cmdHeartbeat builds one heartbeat from a fresh health pass and prints it,

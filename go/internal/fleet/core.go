@@ -147,6 +147,9 @@ const (
 	TriNo
 )
 
+// DetailRelayUnreachable marks an unknown that is our own connectivity failure.
+const DetailRelayUnreachable = "relay unreachable"
+
 type Assessment struct {
 	Name   string
 	Unit   string
@@ -164,7 +167,7 @@ func Assess(name, unit string, present, childAlive Tri, hasIdentity bool) Assess
 		a.State, a.Detail = StateUnknown, "no identity on this host"
 	case present == TriUnknown:
 		// Our own connectivity failure. Never blamed on the agent, never healed.
-		a.State, a.Detail = StateUnknown, "relay unreachable"
+		a.State, a.Detail = StateUnknown, DetailRelayUnreachable
 	case present == TriNo:
 		a.State, a.Detail = StateWedged, "running but absent from relay"
 	case childAlive == TriNo:

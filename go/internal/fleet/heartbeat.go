@@ -63,6 +63,9 @@ func (c HeartbeatConfig) Validate() error {
 	if c.BasicUser != "" && c.BearerTokenFile != "" {
 		return fmt.Errorf("heartbeat: use basic auth or a bearer token, not both")
 	}
+	if (c.BasicUser != "" || c.BearerTokenFile != "") && strings.HasPrefix(c.URL, "http://") && !loopback(c.URL) {
+		return fmt.Errorf("heartbeat: credentials over plain http would travel in cleartext; use https")
+	}
 	return nil
 }
 
@@ -164,6 +167,7 @@ func EncodeJSON(s Snapshot) ([]byte, error) {
 // are left out rather than silently dropped by the receiver.
 func EncodeInflux(s Snapshot) []byte {
 	ts := strconv.FormatInt(s.At, 10) + "000000000"
+	// Tags in key order, as line protocol recommends.
 	host := "host=" + escTag(s.Host)
 	var b strings.Builder
 	line := func(measurement, tags string, fields ...string) {
@@ -192,12 +196,37 @@ func EncodeInflux(s Snapshot) []byte {
 	ok := 0
 	for _, a := range sortedAgents(s.Agents) {
 		ok += healthy(a.State)
-		line("buzzfleet_agent", host+",agent="+escTag(a.Name)+",state="+escTag(string(a.State)),
+		agent := "agent=" + escTag(a.Name) + "," + host
+		line("buzzfleet_agent", agent,
 			"healthy="+strconv.Itoa(healthy(a.State)), "up_seconds="+strconv.FormatInt(a.UpSecs, 10),
 			"restarts_in_window="+strconv.Itoa(a.Restarts))
+		// State as an enum: every known state on every beat, 1 for the current
+		// one. A pushed series has no staleness marker, so a state carried as a
+		// label would leave the old series answering queries for the lookback
+		// window after each change.
+		for _, st := range knownStates(a.State) {
+			v := "0"
+			if st == a.State {
+				v = "1"
+			}
+			line("buzzfleet_agent_state", agent+",state="+escTag(string(st)), "active="+v)
+		}
 	}
 	line("buzzfleet_agents", host, "total="+strconv.Itoa(len(s.Agents)), "ok="+strconv.Itoa(ok))
 	return []byte(b.String())
+}
+
+// AllStates is every state an agent can report, so the state enum always
+// carries a full set of series.
+var AllStates = []State{StateOK, StateWedged, StateStalled, StateDown, StateUnknown, "auth", "limited"}
+
+func knownStates(cur State) []State {
+	for _, s := range AllStates {
+		if s == cur {
+			return AllStates
+		}
+	}
+	return append(append([]State(nil), AllStates...), cur)
 }
 
 // Plain floats, never exponent form, and integers as floats: Mimir treats every
@@ -216,4 +245,21 @@ func sortedAgents(in []AgentReading) []AgentReading {
 	out := append([]AgentReading(nil), in...)
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+func loopback(u string) bool {
+	rest := strings.TrimPrefix(u, "http://")
+	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
+		rest = rest[:i]
+	}
+	if i := strings.LastIndex(rest, "@"); i >= 0 {
+		rest = rest[i+1:]
+	}
+	h := rest
+	if strings.HasPrefix(h, "[") {
+		h = strings.TrimPrefix(strings.SplitN(h, "]", 2)[0], "[")
+	} else if i := strings.LastIndex(h, ":"); i >= 0 {
+		h = h[:i]
+	}
+	return h == "localhost" || h == "127.0.0.1" || h == "::1"
 }

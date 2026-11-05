@@ -136,11 +136,17 @@ on the heartbeat going quiet.
 - **`influx`** is InfluxDB line protocol, which Grafana Cloud's Mimir ingests
   as Prometheus series named `<measurement>_<field>`: `buzzfleet_heartbeat_up`,
   `buzzfleet_host_load1`, `buzzfleet_host_mem_available_bytes`,
-  `buzzfleet_agent_healthy{agent,state}`, `buzzfleet_agents_ok`, and so on.
+  `buzzfleet_agent_healthy{agent}`, `buzzfleet_agents_ok`, and so on. Each
+  agent's state is an enum, `buzzfleet_agent_state_active{agent,state}`: 1
+  for the current state and 0 for every other on each beat. A state carried
+  as a label would leave the old series answering queries for several
+  minutes after every change.
   A silence alert is `absent_over_time(buzzfleet_heartbeat_up{host="…"}[5m])`.
 
 Auth is basic (`basicUser` + `passwordFile`) or a bearer token
-(`bearerTokenFile`). Secrets are read from files on every send, so they never
+(`bearerTokenFile`), and needs https unless the endpoint is on localhost. Logs
+show only the endpoint's scheme and host, because webhook URLs often carry a
+secret in the path or query. Secrets are read from files on every send, so they never
 sit in fleetd.json, and rotating one needs no restart. `intervalSecs` defaults
 to 60.
 

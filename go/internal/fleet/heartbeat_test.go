@@ -25,8 +25,22 @@ func TestInfluxBody(t *testing.T) {
 	want := strings.Join([]string{
 		"buzzfleet_heartbeat,host=host-1 up=1,seq=7,relay_ok=1,assessed_seconds_ago=12 1767225600000000000",
 		"buzzfleet_host,host=host-1 load1=0.5,load5=1.25,load15=2,cpus=2,mem_total_bytes=12884901888,mem_available_bytes=8589934592,swap_total_bytes=8589934592,swap_free_bytes=7516192768,disk_total_bytes=214748364800,disk_free_bytes=42949672960,uptime_seconds=86400 1767225600000000000",
-		"buzzfleet_agent,host=host-1,agent=agent-a,state=ok healthy=1,up_seconds=7200,restarts_in_window=1 1767225600000000000",
-		"buzzfleet_agent,host=host-1,agent=agent-b,state=wedged healthy=0,up_seconds=3600,restarts_in_window=0 1767225600000000000",
+		"buzzfleet_agent,agent=agent-a,host=host-1 healthy=1,up_seconds=7200,restarts_in_window=1 1767225600000000000",
+		"buzzfleet_agent_state,agent=agent-a,host=host-1,state=ok active=1 1767225600000000000",
+		"buzzfleet_agent_state,agent=agent-a,host=host-1,state=wedged active=0 1767225600000000000",
+		"buzzfleet_agent_state,agent=agent-a,host=host-1,state=stalled active=0 1767225600000000000",
+		"buzzfleet_agent_state,agent=agent-a,host=host-1,state=down active=0 1767225600000000000",
+		"buzzfleet_agent_state,agent=agent-a,host=host-1,state=unknown active=0 1767225600000000000",
+		"buzzfleet_agent_state,agent=agent-a,host=host-1,state=auth active=0 1767225600000000000",
+		"buzzfleet_agent_state,agent=agent-a,host=host-1,state=limited active=0 1767225600000000000",
+		"buzzfleet_agent,agent=agent-b,host=host-1 healthy=0,up_seconds=3600,restarts_in_window=0 1767225600000000000",
+		"buzzfleet_agent_state,agent=agent-b,host=host-1,state=ok active=0 1767225600000000000",
+		"buzzfleet_agent_state,agent=agent-b,host=host-1,state=wedged active=1 1767225600000000000",
+		"buzzfleet_agent_state,agent=agent-b,host=host-1,state=stalled active=0 1767225600000000000",
+		"buzzfleet_agent_state,agent=agent-b,host=host-1,state=down active=0 1767225600000000000",
+		"buzzfleet_agent_state,agent=agent-b,host=host-1,state=unknown active=0 1767225600000000000",
+		"buzzfleet_agent_state,agent=agent-b,host=host-1,state=auth active=0 1767225600000000000",
+		"buzzfleet_agent_state,agent=agent-b,host=host-1,state=limited active=0 1767225600000000000",
 		"buzzfleet_agents,host=host-1 total=2,ok=1 1767225600000000000",
 	}, "\n") + "\n"
 	if got != want {
@@ -42,10 +56,10 @@ func TestInfluxHasNoStringFieldsAndEscapesTags(t *testing.T) {
 	if strings.Contains(body, `"`) {
 		t.Fatalf("Mimir drops string fields; there must be none:\n%s", body)
 	}
-	if !strings.Contains(body, `host=a\ host\,with\=odd\ chars`) || !strings.Contains(body, "agent=none,state=down") {
+	if !strings.Contains(body, `host=a\ host\,with\=odd\ chars`) || !strings.Contains(body, "agent=none,host=") {
 		t.Fatalf("tags not escaped:\n%s", body)
 	}
-	if strings.Count(body, "\n") != 4 {
+	if strings.Count(body, "\n") != 4+len(AllStates) {
 		t.Fatalf("one line per series:\n%s", body)
 	}
 }
@@ -87,6 +101,8 @@ func TestHeartbeatConfigValidate(t *testing.T) {
 		{URL: "https://example.invalid/hb"},
 		{URL: "https://example.invalid/api/v1/push/influx/write", Format: "influx", BasicUser: "123", PasswordFile: "/x"},
 		{URL: "http://localhost:9/x", BearerTokenFile: "/x"},
+		{URL: "http://[::1]:9/x", BasicUser: "u", PasswordFile: "/x"},
+		{URL: "http://example.invalid/x"}, // no credentials, so nothing to leak
 	}
 	for _, c := range ok {
 		if err := c.Validate(); err != nil {
@@ -98,6 +114,8 @@ func TestHeartbeatConfigValidate(t *testing.T) {
 		{URL: "https://x", Format: "otlp"},
 		{URL: "https://x", BasicUser: "123"},
 		{URL: "https://x", BasicUser: "123", PasswordFile: "/a", BearerTokenFile: "/b"},
+		{URL: "http://example.invalid/x", BearerTokenFile: "/x"},
+		{URL: "http://localhost.example.invalid/x", BasicUser: "u", PasswordFile: "/x"},
 	}
 	for _, c := range bad {
 		if err := c.Validate(); err == nil {
@@ -106,5 +124,23 @@ func TestHeartbeatConfigValidate(t *testing.T) {
 	}
 	if (HeartbeatConfig{}).Interval() != 60 || (HeartbeatConfig{IntervalSecs: 30}).Interval() != 30 {
 		t.Fatal("interval default")
+	}
+}
+
+func TestStateEnumHasOneActiveStatePerAgent(t *testing.T) {
+	body := string(EncodeInflux(snap()))
+	for _, agent := range []string{"agent-a", "agent-b"} {
+		active := 0
+		for _, l := range strings.Split(body, "\n") {
+			if strings.HasPrefix(l, "buzzfleet_agent_state,agent="+agent+",") && strings.Contains(l, " active=1 ") {
+				active++
+			}
+		}
+		if active != 1 {
+			t.Fatalf("%s: %d active states", agent, active)
+		}
+	}
+	if strings.Contains(body, "buzzfleet_agent,agent=agent-a,host=host-1,state=") {
+		t.Fatal("the health line must not carry state as a label")
 	}
 }

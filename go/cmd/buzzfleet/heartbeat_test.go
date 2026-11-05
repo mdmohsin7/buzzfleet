@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -8,8 +9,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mdmohsin7/buzzfleet/internal/fleet"
+	"github.com/mdmohsin7/buzzfleet/internal/host"
 )
 
 // mockMimir stands in for Grafana Cloud's influx endpoint: basic auth, line
@@ -70,9 +73,11 @@ func TestHeartbeatToMimirInflux(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, want := range map[string]string{
-		"buzzfleet_heartbeat_up{host=host-1}":                           "1",
-		"buzzfleet_agent_healthy{host=host-1,agent=agent-a,state=stalled}": "0",
-		"buzzfleet_agents_ok{host=host-1}":                              "0",
+		"buzzfleet_heartbeat_up{host=host-1}":                                   "1",
+		"buzzfleet_agent_healthy{agent=agent-a,host=host-1}":                    "0",
+		"buzzfleet_agent_state_active{agent=agent-a,host=host-1,state=stalled}": "1",
+		"buzzfleet_agent_state_active{agent=agent-a,host=host-1,state=ok}":      "0",
+		"buzzfleet_agents_ok{host=host-1}":                                      "0",
 	} {
 		if series[name] != want {
 			t.Fatalf("%s = %q, want %q; got %v", name, series[name], want, series)
@@ -111,10 +116,38 @@ func TestHeartbeatAuthAndErrors(t *testing.T) {
 }
 
 func TestRedactURL(t *testing.T) {
-	if got := redactURL("https://user:secret@example.invalid/x"); strings.Contains(got, "secret") {
-		t.Fatalf("got %s", got)
+	for in, want := range map[string]string{
+		"https://user:secret@example.invalid/x":        "https://example.invalid",
+		"https://example.invalid/hooks/PATHSECRET?a=b": "https://example.invalid",
+		"https://example.invalid:8443/x?token=QSECRET": "https://example.invalid:8443",
+		"not a url": "(heartbeat url)",
+	} {
+		if got := redactURL(in); got != want {
+			t.Fatalf("%s: got %s", in, got)
+		}
 	}
-	if got := redactURL("https://example.invalid/x"); got != "https://example.invalid/x" {
-		t.Fatalf("got %s", got)
+}
+
+// Webhook receivers put secrets in the path and query. None of them may
+// reach the journal: not in the start line, not in the failure line.
+func TestHeartbeatSecretsNeverLogged(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	dead := srv.URL
+	srv.Close() // connection refused from here on
+
+	cfg := &fleet.Config{Host: "host-1", HealWindowSecs: 3600, Heartbeat: fleet.HeartbeatConfig{
+		URL: strings.Replace(dead, "http://", "http://u:PWSECRET@", 1) + "/hooks/PATHSECRET?token=QUERYSECRET"}}
+	out := capture(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		heartbeatLoop(ctx, host.New(t.TempDir()), cfg, &fleetView{})
+	})
+	if !strings.Contains(out, "heartbeat failed") {
+		t.Fatalf("expected a failure line, got:\n%s", out)
+	}
+	for _, secret := range []string{"PWSECRET", "PATHSECRET", "QUERYSECRET"} {
+		if strings.Contains(out, secret) {
+			t.Fatalf("%s leaked into the log:\n%s", secret, out)
+		}
 	}
 }

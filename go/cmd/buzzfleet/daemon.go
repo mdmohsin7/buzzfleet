@@ -314,7 +314,7 @@ func helpText(cfg *fleet.Config) string {
 		"restart <agent>     atomic; cannot orphan a second harness\n"+
 		"start|stop <agent>\n"+
 		"logs <agent> [n]    recent journal lines\n"+
-		"doctor              duplicates, permissions, membership\n"+
+		"doctor              duplicates, permissions, membership, limits\n"+
 		"```\nAddress me as `@%s`%s. Only the owner is obeyed.",
 		cfg.Name, cfg.Host, cfg.Name, broadcast)
 }

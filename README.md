@@ -77,7 +77,7 @@ restart <agent>
 start | stop <agent>
 logs <agent> [n]
 prompt <agent> [text]   show or set its personality
-doctor              duplicates, permissions, membership
+doctor              duplicates, permissions, membership, enforced limits
 ```
 
 Only the owner is obeyed. Short replies land inline; long ones are threaded.
@@ -96,7 +96,7 @@ It is a plain file at `agents/<name>/system-prompt.md`; the agent restarts to
 pick it up.
 
 From the shell, the same operations plus `add`, `rename`, `reap`, `join`,
-`channels`, `install` and `init`. Run `buzzfleet` for the full list.
+`channels`, `limits`, `install` and `init`. Run `buzzfleet` for the full list.
 
 ## Health
 
@@ -112,6 +112,46 @@ From the shell, the same operations plus `add`, `rename`, `reap`, `join`,
 confirmations, and the supervisor says what it did in the channel. It stops
 after three restarts an hour and tells you once, because an agent a restart
 cannot fix should not be restarted forever.
+
+## Resource limits
+
+A small host running several coding agents is one parallel test suite away
+from a load of 50, and then sshd, the supervisor and every agent crawl
+together. `buzzfleet limits` sizes a ceiling for all the agents together from
+the host's cores and RAM, keeping half a core and an eighth of RAM (at least
+1 GiB) for the host itself:
+
+```
+$ buzzfleet limits
+host        2 cores, 11941M RAM, cgroup hybrid
+agents      150% CPU and 10449M memory between them
+
+  sudo systemctl set-property user@1001.service CPUAccounting=yes MemoryAccounting=yes CPUQuota=150% MemoryLimit=10449M
+```
+
+`--apply` runs that command. Where the ceiling goes depends on the host:
+
+- **cgroup v2 with cpu and memory delegated** to your user manager: on
+  `buzz-agent.slice`, which holds exactly the agents. No root needed.
+- **cgroup v1, or v2 without delegation** (Ubuntu 20.04 and older): on the
+  system unit `user@UID.service`, with sudo. That holds every user unit, the
+  supervisor included, but not SSH sessions, so a saturated fleet still cannot
+  lock you out. Per-agent limits cannot work here at all: systemd accepts a
+  `MemoryMax=` in an agent's drop-in and silently ignores it.
+
+Because systemd accepts limits it cannot apply, `doctor` reads the kernel's own
+cgroup files for each agent and says which ceiling actually binds:
+
+```
+ok   dexy: enforced CPU 150% (on user@1001.service), memory 10449M (on user@1001.service)
+WARN dexy: its unit sets MemoryMax=1600M but that is NOT enforced
+```
+
+Override any number in `fleetd.json`:
+
+```json
+"limits": { "cpuPercent": 120, "memoryMaxMB": 8000, "dockerCpus": 0.5, "dockerMemoryMB": 2048 }
+```
 
 ## Layout
 

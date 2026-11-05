@@ -203,6 +203,11 @@ func cmdRunAgent(h *host.Host, args []string) {
 	}, ":"))
 	env = setEnv(env, "BUZZ_RELAY_URL", conf.Relay)
 	env = setEnv(env, "BUZZ_ACP_AGENT_COMMAND", agentCmd)
+	// Containers are made by dockerd, outside this unit's cgroup, so they are
+	// capped on the way in instead: the supervisor serves this socket.
+	if cfg, err := loadConfig(h); err == nil && !cfg.Limits.NoDockerProxy {
+		env = setEnv(env, "DOCKER_HOST", "unix://"+host.DockerSocketFor(name))
+	}
 
 	argv := []string{"buzz-acp", "--respond-to", respondTo}
 	if conf.Owner != "" {

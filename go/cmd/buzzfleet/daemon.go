@@ -103,6 +103,7 @@ func runDaemon(h *host.Host, cfg *fleet.Config) {
 
 	go healthLoop(ctx, h, cfg, state)
 	go subscribeLoop(ctx, h, cfg, state, seen)
+	go dockerLoop(ctx, h, cfg)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)

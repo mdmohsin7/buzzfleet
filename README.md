@@ -125,6 +125,7 @@ the host's cores and RAM, keeping half a core and an eighth of RAM (at least
 $ buzzfleet limits
 host        2 cores, 11941M RAM, cgroup hybrid
 agents      150% CPU and 10449M memory between them
+containers  1 CPU and 2985M memory each, via the supervisor's Docker proxy
 
   sudo systemctl set-property user@1001.service CPUAccounting=yes MemoryAccounting=yes CPUQuota=150% MemoryLimit=10449M
 ```
@@ -152,6 +153,22 @@ Override any number in `fleetd.json`:
 ```json
 "limits": { "cpuPercent": 120, "memoryMaxMB": 8000, "dockerCpus": 0.5, "dockerMemoryMB": 2048 }
 ```
+
+### Containers
+
+Containers are created by dockerd, outside the agent's cgroup, so they escape
+every ceiling on it. The supervisor serves a Docker API proxy per agent, and
+each agent's `DOCKER_HOST` points at it. On container create and update the
+proxy fills in a CPU and memory cap where none was asked for and clamps one
+that asks for more; a smaller request is kept as asked. It also labels each
+container `buzzfleet.agent=<name>` and `buzzfleet.created=<unix time>`. Compose,
+SDKs and the CLI all go through it, interactive and streaming sessions included.
+
+This is a guardrail, not a security boundary: an agent in the `docker` group can
+still reach `/var/run/docker.sock` directly. `docker build` steps run inside
+BuildKit rather than as containers, so they are not capped. Set
+`"noDockerProxy": true` under `limits` to turn the proxy off. An agent picks up
+the proxy when it next restarts, and `doctor` lists the ones that have not.
 
 ## Layout
 

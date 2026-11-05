@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mdmohsin7/buzzfleet/internal/fleet"
 	"github.com/mdmohsin7/buzzfleet/internal/host"
@@ -226,7 +227,14 @@ func assessAll(h *host.Host, cfg *fleet.Config) []fleet.Assessment {
 				}
 			}
 		}
-		out = append(out, fleet.Assess(n, unit, present, child, hasID))
+		a := fleet.Assess(n, unit, present, child, hasID)
+		// Only worth reading transcripts for an agent that otherwise looks
+		// fine: that is the one whose failing turns nothing else would catch.
+		if a.State == fleet.StateOK {
+			st, detail := fleet.InferenceState(fleet.Latest(h.InferenceSignals(n)), time.Now())
+			a = fleet.WithInference(a, st, detail)
+		}
+		out = append(out, a)
 	}
 	return out
 }

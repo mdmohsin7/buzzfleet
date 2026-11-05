@@ -33,6 +33,9 @@ type daemonState struct {
 	Seen        []string           `json:"seen"`
 	HealHistory map[string][]int64 `json:"healHistory"`
 	GaveUp      map[string]int64   `json:"gaveUp"`
+	// Agents last reported as auth/limited, so a supervisor restart does not
+	// announce the same expired login again.
+	Inference map[string]string `json:"inference"`
 }
 
 func statePath(h *host.Host) string {
@@ -54,6 +57,9 @@ func loadState(h *host.Host) *daemonState {
 	}
 	if s.GaveUp == nil {
 		s.GaveUp = map[string]int64{}
+	}
+	if s.Inference == nil {
+		s.Inference = map[string]string{}
 	}
 	return s
 }
@@ -377,7 +383,15 @@ func tick(h *host.Host, cfg *fleet.Config, state *daemonState, strikes map[strin
 	now := time.Now().Unix()
 	fleet.PruneHeals(state.HealHistory, now, int64(cfg.HealWindowSecs))
 
-	for _, a := range assessAll(h, cfg) {
+	rows := assessAll(h, cfg)
+	notices, next := fleet.InferenceNotices(cfg.Host, state.Inference, rows)
+	state.Inference = next
+	for _, n := range notices {
+		logf("%s", n)
+		say(h, cfg, n, "")
+	}
+
+	for _, a := range rows {
 		if cfg.NoAutoHeal {
 			continue
 		}

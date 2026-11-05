@@ -108,6 +108,31 @@ From the shell, the same operations plus `add`, `rename`, `reap`, `join`,
 | `down` | not running |
 | `unknown` | the relay was unreachable — never blamed on the agent |
 
+An agent can also be up, present and answering while every turn fails: its
+model login expired, or the account ran out of usage. The supervisor reads the
+coding agent's own transcripts (Claude Code under `$CLAUDE_CONFIG_DIR/projects`,
+Codex under `$CODEX_HOME/sessions`, for the agent's workdir and repos below it)
+and the latest turn decides:
+
+| state | meaning |
+|---|---|
+| `auth` | the model provider rejected the agent's login (401 / authentication_failed) |
+| `limited` | the account hit a usage limit (429 / rate_limit), shown with its reset time when the provider gave one |
+
+Neither is ever restarted, because a restart fixes neither. The supervisor
+says so once in the channel, naming every agent that went down for the same
+reason in one message, since one account limit takes them all at once:
+
+```
+host-1 — agent-a, agent-b, agent-c are out of model usage (usage limit until Jan 12 22:00 UTC).
+Every turn is failing, so I am not restarting them: a restart does not fix this.
+```
+
+The state clears on the agent's next good turn, or for a limit with a known
+reset, when the reset passes. It says once when they are answering again.
+Only the coding agent's own error records count: a `401` printed by a command
+the agent ran is not its credentials failing.
+
 `wedged` and `stalled` are healed automatically after two consecutive
 confirmations, and the supervisor says what it did in the channel. It stops
 after three restarts an hour and tells you once, because an agent a restart

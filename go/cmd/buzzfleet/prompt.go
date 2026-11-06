@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/mdmohsin7/buzzfleet/internal/fleet"
 	"github.com/mdmohsin7/buzzfleet/internal/host"
 )
 
@@ -49,9 +50,15 @@ func cmdPrompt(h *host.Host, args []string) {
 			"  buzzfleet prompt <agent>                 show it\n" +
 			"  buzzfleet prompt <agent> --file <path>   set it from a file\n" +
 			"  buzzfleet prompt <agent> --set \"...\"     set it inline\n" +
-			"  buzzfleet prompt <agent> --edit          open it in $EDITOR")
+			"  buzzfleet prompt <agent> --edit          open it in $EDITOR\n" +
+			"  buzzfleet prompt <agent>@<community> [--set \"...\" | --file <path> | --clear]\n" +
+			"                                           that community's addendum to it")
 	}
 	agent := args[0]
+	if a, c, all := fleet.ParseTarget(agent); !all {
+		communityPrompt(h, a, c, args[1:])
+		return
+	}
 	if _, err := h.AgentConfig(agent); err != nil {
 		die("%v", err)
 	}
@@ -87,6 +94,38 @@ func cmdPrompt(h *host.Host, args []string) {
 			return
 		}
 		fmt.Print(p)
+	}
+}
+
+// communityPrompt shows or sets one community's addendum to the agent's
+// personality, and restarts only that community's harness.
+func communityPrompt(h *host.Host, agent, community string, args []string) {
+	t := mustOne(h, agent+"@"+community, "prompt")
+	if len(t.Config.Communities) == 0 {
+		die("%s is in one community; its personality is `buzzfleet prompt %s`", agent, agent)
+	}
+	flags := parseFlags(args)
+	text := flags["set"]
+	if f := flags["file"]; f != "" {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			die("cannot read %s: %v", f, err)
+		}
+		text = string(b)
+	}
+	if text == "" && !contains(args, "--clear") {
+		fmt.Print(describeCommunityPrompt(h, agent, community))
+		return
+	}
+	p := addendumPath(h, agent, community)
+	if contains(args, "--clear") {
+		_ = os.Remove(p)
+	} else if err := os.WriteFile(p, []byte(strings.TrimRight(text, "\n")+"\n"), 0o644); err != nil {
+		die("%v", err)
+	}
+	fmt.Printf("%s: addendum updated\n", t.Label)
+	if h.UnitState(t.Instance()) == "active" {
+		lifecycleOne(h, "restart", t)
 	}
 }
 

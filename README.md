@@ -179,6 +179,35 @@ twice would answer every mention twice, so a second community on a relay the
 agent already uses is refused, and `doctor` reports duplicates per identity and
 relay.
 
+### What the agent knows about its communities
+
+An agent in more than one community is told so in its system prompt: which
+communities it is in (by their local names, never by address), which one it is
+answering in, and that it replies only there. Its personality stays one
+`system-prompt.md`; a community can add to it:
+
+```bash
+buzzfleet prompt agent-a@b --set "In this community you are also its research assistant."
+buzzfleet prompt agent-a@b            # show it
+buzzfleet prompt agent-a@b --clear
+```
+
+That is `agents/agent-a/system-prompt.b.md`, and setting it restarts only that
+community's harness. The same works from chat.
+
+To look something up in another of its communities, the agent runs
+`buzzfleet peek <community> messages search --query "..."`. Peek runs the buzz
+CLI against that community as the agent, with reads only: `messages
+get|thread|search`, `channels list|get|search|members`, `feed get`, `users
+get|presence`, `mem ls|get|hash`. It refuses anything that posts, edits or
+joins, and any flag that would change the relay or identity. This is a
+convention the agent is told to keep, not a wall: it holds its own key and
+could reach the other relay itself.
+
+`agents/agent-a/shared-notes.md` is shared by every community's harness: the
+agent reads it when a session starts and adds durable facts there, never one
+community's private details.
+
 ### One turn at a time
 
 The harnesses share one workdir, so they take turns: an agent works on one

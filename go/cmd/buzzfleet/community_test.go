@@ -185,3 +185,98 @@ func TestHealTargetsOnlyTheWedgedHarness(t *testing.T) {
 		t.Fatalf("and main resolves to main alone: %+v", got)
 	}
 }
+
+func TestHarnessPromptForAMultiCommunityAgent(t *testing.T) {
+	h := fixtureHost(t)
+	_ = writeCommunities(h, "agent-a", map[string]fleet.CommunityConfig{
+		"b": {Relay: "wss://relay-b.example", Access: fleet.AccessFull}})
+	dir := filepath.Join(h.FleetHome, "agents", "agent-a")
+	_ = os.WriteFile(filepath.Join(dir, "system-prompt.md"), []byte("You are the base persona.\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "system-prompt.b.md"), []byte("In b you are also its research assistant.\n"), 0o644)
+	c, _ := h.AgentConfig("agent-a")
+
+	path, env, err := harnessPrompt(h, c, fleet.Harness{Agent: "agent-a", Community: "b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(path)
+	s := string(b)
+	base, add, sec := strings.Index(s, "base persona"), strings.Index(s, "research assistant"), strings.Index(s, "## Your communities")
+	if base < 0 || add < base || sec < add {
+		t.Fatalf("personality, then the community's addendum, then where it is:\n%s", s)
+	}
+	if strings.Contains(s, "relay-b.example") {
+		t.Fatal("no relay address in the prompt")
+	}
+	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
+		t.Fatalf("generated prompt mode %o", fi.Mode().Perm())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "shared-notes.md")); err != nil {
+		t.Fatal("the shared notes file is created")
+	}
+	joined := strings.Join(env, "\n")
+	if !strings.Contains(joined, `BUZZ_FLEET_COMMUNITIES=[{"name":"main","current":false},{"name":"b","current":true}]`) ||
+		!strings.Contains(joined, "BUZZ_FLEET_SHARED_NOTES="+filepath.Join(dir, "shared-notes.md")) {
+		t.Fatalf("env: %v", env)
+	}
+
+	// main has no addendum: personality and section only, and it is told it
+	// is answering in main.
+	path, _, _ = harnessPrompt(h, c, fleet.Harness{Agent: "agent-a", Community: fleet.MainCommunity})
+	b, _ = os.ReadFile(path)
+	if strings.Contains(string(b), "research assistant") || !strings.Contains(string(b), "answering in **main** now") {
+		t.Fatalf("main's prompt:\n%s", b)
+	}
+	// An existing notes file is never overwritten.
+	_ = os.WriteFile(filepath.Join(dir, "shared-notes.md"), []byte("kept\n"), 0o640)
+	_, _, _ = harnessPrompt(h, c, fleet.Harness{Agent: "agent-a", Community: "b"})
+	if b, _ := os.ReadFile(filepath.Join(dir, "shared-notes.md")); string(b) != "kept\n" {
+		t.Fatal("notes overwritten")
+	}
+}
+
+func TestPeekEnvCarriesOnlyWhatItNeeds(t *testing.T) {
+	from := []string{"PATH=/bin", "HOME=/h", "BUZZ_AUTH_TAG=[\"auth\",\"owner\",\"\",\"sig\"]",
+		"BUZZ_RELAY_URL=https://relay-b.example", "BUZZ_PRIVATE_KEY=harness-key", "BUZZ_FLEET_HARNESS=agent-a--b",
+		"BUZZ_OUTPUT_FORMAT=compact", "ANTHROPIC_API_KEY=x"}
+	env := strings.Join(peekEnv(from, "https://relay-a.example", "agent-key"), "\n")
+	for _, gone := range []string{"BUZZ_AUTH_TAG", "relay-b.example", "harness-key", "ANTHROPIC_API_KEY", "BUZZ_FLEET_HARNESS"} {
+		if strings.Contains(env, gone) {
+			t.Fatalf("%s must not reach the other community's relay:\n%s", gone, env)
+		}
+	}
+	for _, kept := range []string{"PATH=/bin", "HOME=/h", "BUZZ_OUTPUT_FORMAT=compact", "BUZZ_RELAY_URL=https://relay-a.example", "BUZZ_PRIVATE_KEY=agent-key"} {
+		if !strings.Contains(env, kept) {
+			t.Fatalf("missing %s:\n%s", kept, env)
+		}
+	}
+}
+
+func TestPeekReadsOnlyAsTheAgent(t *testing.T) {
+	h := fixtureHost(t)
+	agentKey := strings.Repeat("0", 63) + "1"
+	ownerKey := strings.Repeat("0", 63) + "2"
+	_ = os.WriteFile(filepath.Join(h.FleetHome, "agents", "agent-a", "identity.env"), []byte("BUZZ_PRIVATE_KEY="+agentKey+"\n"), 0o600)
+
+	if k, err := peekSecret(h, "agent-a", true, ownerKey); err != nil || k != agentKey {
+		t.Fatalf("operator mode must use the agent's key, not the caller's: %q %v", k, err)
+	}
+	if _, err := peekSecret(h, "agent-a", false, ownerKey); err == nil {
+		t.Fatal("inside a harness, a key that is not the agent's is refused")
+	}
+	if k, err := peekSecret(h, "agent-a", false, agentKey); err != nil || k != agentKey {
+		t.Fatalf("the agent's own key: %q %v", k, err)
+	}
+	if k, _ := peekSecret(h, "agent-a", false, ""); k != agentKey {
+		t.Fatal("no key in the environment: the agent's from its identity file")
+	}
+}
+
+func TestPeekInsideAHarnessIsThatAgentOnly(t *testing.T) {
+	if peekAgentAllowed("agent-a", "agent-b", true) == nil {
+		t.Fatal("one agent must not peek as another")
+	}
+	if peekAgentAllowed("agent-a", "agent-a", true) != nil || peekAgentAllowed("", "agent-b", true) != nil || peekAgentAllowed("agent-a", "", false) != nil {
+		t.Fatal("its own agent, or an operator outside any harness, is fine")
+	}
+}

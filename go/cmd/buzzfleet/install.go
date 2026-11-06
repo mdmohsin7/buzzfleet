@@ -170,8 +170,8 @@ func cmdRunAgent(h *host.Host, args []string) {
 	if err != nil {
 		die("%v", err)
 	}
-	if err := fleet.CheckCommunities(conf.Relay, conf.Communities); err != nil {
-		die("%s: %v", name, err)
+	if err := fleet.CheckCommunity(conf.Relay, conf.Communities, hn.Community); err != nil {
+		die("%s: %v", instance, err)
 	}
 	member, ok := conf.In(hn.Community)
 	if !ok {

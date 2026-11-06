@@ -263,7 +263,12 @@ func handleCommand(h *host.Host, cfg *fleet.Config, text string) string {
 		return hostPrefix + block(healthText(h, cfg))
 	case "restart", "start", "stop":
 		if arg == "" {
-			return fmt.Sprintf("usage: `%s <agent>`", verb)
+			return fmt.Sprintf("usage: `%s <agent>[@community]`", verb)
+		}
+		// Resolved here rather than inside the CLI path, which exits on an
+		// unknown name: a typo in chat must not take the supervisor down.
+		if _, err := resolve(h, arg); err != nil {
+			return fmt.Sprintf("`%v`", err)
 		}
 		return hostPrefix + block(capture(func() { cmdLifecycle(h, verb, []string{arg}) }))
 	case "logs":

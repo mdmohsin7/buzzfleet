@@ -138,3 +138,50 @@ func TestSplitFlags(t *testing.T) {
 		t.Fatal("a bare flag is present with an empty value")
 	}
 }
+
+func TestGroupHarnessesByIdentityAndRelay(t *testing.T) {
+	a1 := host.Proc{PID: "1", Agent: "agent-a", Pubkey: "pk", Relay: "wss://relay-a.example", Supervised: true}
+	b1 := host.Proc{PID: "2", Agent: "agent-a", Pubkey: "pk", Relay: "wss://relay-b.example", Supervised: true}
+	keys, by := groupHarnesses([]host.Proc{a1, b1})
+	if len(keys) != 2 {
+		t.Fatalf("one identity in two communities is two groups of one: %v", by)
+	}
+	stray := host.Proc{PID: "3", Agent: "agent-a", Pubkey: "pk", Relay: "wss://relay-b.example"}
+	keys, by = groupHarnesses([]host.Proc{a1, b1, stray})
+	if len(keys) != 2 || len(by[keys[1]]) != 2 {
+		t.Fatalf("the same identity twice on one relay is a duplicate: %v", by)
+	}
+	// Started by hand with flags, so no relay in its environment: it must
+	// still be counted against the identity, not hide as a group of one.
+	flags := host.Proc{PID: "4", Agent: "agent-a", Pubkey: "pk"}
+	keys, by = groupHarnesses([]host.Proc{a1, flags})
+	if len(keys) != 1 || len(by[keys[0]]) != 2 {
+		t.Fatalf("relay unknown: %v", by)
+	}
+	noenv := host.Proc{PID: "5", Agent: "agent-a"}
+	keys, _ = groupHarnesses([]host.Proc{a1, noenv})
+	if len(keys) != 1 {
+		t.Fatal("no environment at all: grouped by agent")
+	}
+}
+
+func TestHealTargetsOnlyTheWedgedHarness(t *testing.T) {
+	h := fixtureHost(t)
+	_ = writeCommunities(h, "agent-a", map[string]fleet.CommunityConfig{
+		"b": {Relay: "wss://relay-b.example", Access: fleet.AccessFull}})
+	ts, _ := resolve(h, "agent-a")
+	wedged := assessTarget(ts[1], "active", fleet.TriNo, fleet.TriUnknown, true)
+	if !wedged.NeedsHeal() {
+		t.Fatalf("absent from b's relay: %+v", wedged)
+	}
+	// What the supervisor restarts is whatever the assessment's name
+	// resolves to.
+	got, err := resolve(h, wedged.Name)
+	if err != nil || len(got) != 1 || got[0].Instance() != "agent-a--b" {
+		t.Fatalf("a wedge in b must restart b alone, got %+v (%v)", got, err)
+	}
+	ok := assessTarget(ts[0], "active", fleet.TriYes, fleet.TriYes, true)
+	if got, _ := resolve(h, ok.Name); len(got) != 1 || got[0].Instance() != "agent-a" {
+		t.Fatalf("and main resolves to main alone: %+v", got)
+	}
+}

@@ -84,3 +84,48 @@ func allTargets(h *host.Host) []target {
 	}
 	return out
 }
+
+// assessTarget assesses one harness under its own label, so that a heal acts
+// on that harness alone: a wedge in one community must not restart the
+// agent's others.
+func assessTarget(t target, unit string, present, child fleet.Tri, hasID bool) fleet.Assessment {
+	return fleet.Assess(t.Label, unit, present, child, hasID)
+}
+
+// groupHarnesses groups processes that must not coexist: one identity on one
+// relay. A process whose relay cannot be told (started by hand with flags
+// rather than environment) joins any other process of the same identity, or
+// failing that the same agent, rather than hiding as a group of one.
+func groupHarnesses(procs []host.Proc) ([]string, map[string][]host.Proc) {
+	byKey := map[string][]host.Proc{}
+	var keys []string
+	add := func(k string, p host.Proc) {
+		if _, seen := byKey[k]; !seen {
+			keys = append(keys, k)
+		}
+		byKey[k] = append(byKey[k], p)
+	}
+	var unknown []host.Proc
+	for _, p := range procs {
+		if p.Relay == "" {
+			unknown = append(unknown, p)
+			continue
+		}
+		add(p.DuplicateKey(), p)
+	}
+	for _, p := range unknown {
+		home := ""
+		for _, k := range keys {
+			q := byKey[k][0]
+			if (p.Pubkey != "" && q.Pubkey == p.Pubkey) || (p.Pubkey == "" && q.Agent == p.Agent) {
+				home = k
+				break
+			}
+		}
+		if home == "" {
+			home = p.DuplicateKey()
+		}
+		add(home, p)
+	}
+	return keys, byKey
+}

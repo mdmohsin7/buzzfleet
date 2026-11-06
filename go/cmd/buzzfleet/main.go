@@ -293,7 +293,7 @@ func assessAll(h *host.Host, cfg *fleet.Config) []fleet.Assessment {
 				}
 			}
 		}
-		a := fleet.Assess(t.Label, unit, present, child, hasID)
+		a := assessTarget(t, unit, present, child, hasID)
 		// Only worth reading transcripts for an agent that otherwise looks
 		// fine: that is the one whose failing turns nothing else would catch.
 		if a.State == fleet.StateOK {
@@ -392,16 +392,8 @@ func cmdDoctor(h *host.Host) {
 
 	// One identity on one relay must have exactly one harness. The same
 	// identity on two relays is one agent in two communities, which is fine.
-	byKey := map[string][]host.Proc{}
-	var keys []string
 	procs := h.Harnesses(derivePubkey)
-	for _, p := range procs {
-		k := p.DuplicateKey()
-		if _, seen := byKey[k]; !seen {
-			keys = append(keys, k)
-		}
-		byKey[k] = append(byKey[k], p)
-	}
+	keys, byKey := groupHarnesses(procs)
 	clean := true
 	for _, k := range keys {
 		list := byKey[k]

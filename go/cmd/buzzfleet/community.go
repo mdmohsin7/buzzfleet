@@ -205,6 +205,14 @@ func cmdCommunityAdd(h *host.Host, args []string) {
 
 	inst := fleet.Harness{Agent: agent, Community: name}.Instance()
 	raw, _ := h.RawAgentConfig(agent)
+	// Prove the config can be edited before joining anything: a hand-edited
+	// file that cannot be changed cleanly should stop the add here, not after
+	// the invite is spent.
+	if v, err := communitiesJSON(next); err != nil {
+		die("%v", err)
+	} else if _, err := fleet.SetTopLevelKey(raw, "communities", v); err != nil {
+		die("cannot edit agent.json: %v", err)
+	}
 	var links []string
 	// Undo, in reverse, whatever got done. Joining the community cannot be
 	// undone from here; it is harmless, and said.
@@ -265,6 +273,7 @@ func cmdCommunityAdd(h *host.Host, args []string) {
 	fmt.Printf("  unit %s: active\n", host.UnitFor(inst))
 	fmt.Printf("\n%s@%s is up. It has joined no channels there yet:\n", agent, name)
 	fmt.Printf("  buzzfleet channels %s@%s     (then: buzzfleet join %s@%s <channel-uuid>)\n", agent, name, agent, name)
+	fmt.Println("  (its Docker proxy socket appears within a minute, once the supervisor next looks)")
 }
 
 type profile struct{ name, about, avatar string }

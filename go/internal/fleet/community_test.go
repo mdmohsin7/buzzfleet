@@ -183,3 +183,91 @@ func TestTopLevelKeyEdgeCases(t *testing.T) {
 		t.Fatal("not an object")
 	}
 }
+
+func TestRefusesDocumentsAnEditCouldNotCleanlyChange(t *testing.T) {
+	// Go merges a repeated key and matches names case-insensitively, so an
+	// edit to one of these would leave a community the reader still sees.
+	for name, doc := range map[string]string{
+		"duplicate key":  `{"communities": {"old": {}}, "relay": "x", "communities": {"later": {}}}`,
+		"case variant":   `{"Communities": {"b": {}}, "relay": "x"}`,
+		"trailing value": "{\"relay\": \"x\"}\n{\"y\": \"}\"}",
+	} {
+		if _, err := SetTopLevelKey([]byte(doc), "communities", []byte(`{}`)); err == nil {
+			t.Fatalf("%s: set must refuse", name)
+		}
+		if _, err := DeleteTopLevelKey([]byte(doc), "communities"); err == nil {
+			t.Fatalf("%s: delete must refuse", name)
+		}
+	}
+	// A string that merely contains the key, or a nested one, is fine.
+	ok := `{"note": "communities }", "x": {"Communities": 1}}`
+	if _, err := SetTopLevelKey([]byte(ok), "communities", []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestVerifySpliceCatchesCollateralChange(t *testing.T) {
+	before := []byte(`{"a": 1, "communities": {}}`)
+	if err := verifySplice(before, []byte(`{"a": 2, "communities": {"b": 1}}`), "communities", []byte(`{"b": 1}`)); err == nil {
+		t.Fatal("a change to another key must be caught")
+	}
+	if err := verifySplice(before, []byte(`{"a": 1, "z": 0, "communities": {}}`), "communities", []byte(`{}`)); err == nil {
+		t.Fatal("an added key must be caught")
+	}
+	if err := verifySplice(before, []byte(`{"a": 1, "communities": {}}`), "communities", nil); err == nil {
+		t.Fatal("a delete that left the key must be caught")
+	}
+	if err := verifySplice(before, []byte(`{"a": 1, "communities": {}`), "communities", []byte(`{}`)); err == nil {
+		t.Fatal("invalid output must be caught")
+	}
+}
+
+func TestCheckCommunityOnlyConcernsItsOwn(t *testing.T) {
+	cs := map[string]CommunityConfig{
+		"b": {Relay: "wss://relay-b.example", Access: "typo"},
+		"c": {Relay: "wss://relay-c.example", Access: AccessFull},
+		"d": {Relay: "wss://relay-c.example/", Access: AccessFull},
+	}
+	if CheckCommunity("wss://relay-a.example", cs, MainCommunity) != nil {
+		t.Fatal("a mistake in another community must not stop the main harness")
+	}
+	if CheckCommunity("wss://relay-a.example", cs, "b") == nil {
+		t.Fatal("b's own access typo")
+	}
+	if CheckCommunity("wss://relay-a.example", cs, "c") == nil || CheckCommunity("wss://relay-a.example", cs, "d") == nil {
+		t.Fatal("both sides of a shared relay are refused")
+	}
+	if CheckCommunity("wss://relay-c.example", map[string]CommunityConfig{"c": {Relay: "wss://relay-c.example", Access: AccessFull}}, "c") == nil {
+		t.Fatal("a community on main's relay")
+	}
+}
+
+// Each refusal is pinned on its own, not only through the verification that
+// backs it up.
+func TestTopLevelSpanRefusals(t *testing.T) {
+	for doc, want := range map[string]string{
+		`{"communities": {}, "communities": {}}`: "more than once",
+		`{"COMMUNITIES": {}}`:                   "reads as",
+		"{\"a\": 1}\n{\"b\": 2}":                "after its closing brace",
+	} {
+		_, _, _, _, err := topLevelSpan([]byte(doc), "communities")
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("%s: want %q, got %v", doc, want, err)
+		}
+	}
+}
+
+func TestSetTopLevelKeyIsVerified(t *testing.T) {
+	// The splice itself cannot be made to misbehave on a document the
+	// scanner accepts, so check the wiring: what Set returns always passes
+	// verification against its input.
+	for _, doc := range []string{legacyAgentJSON, `{}`, `{"a":1,"communities":{"x":2},"b":[3]}`, "{\r\n\t\"a\": 1\r\n}"} {
+		out, err := SetTopLevelKey([]byte(doc), "communities", []byte(`{"b":{}}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := verifySplice([]byte(doc), out, "communities", []byte(`{"b":{}}`)); err != nil {
+			t.Fatalf("%q: %v", doc, err)
+		}
+	}
+}

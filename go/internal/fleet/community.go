@@ -174,6 +174,38 @@ func CheckCommunities(mainRelay string, cs map[string]CommunityConfig) error {
 	return nil
 }
 
+// CheckCommunity validates one community, including whether its relay
+// collides with any other. A mistake in one extra community stops only the
+// harnesses it concerns, never the agent's main one.
+func CheckCommunity(mainRelay string, cs map[string]CommunityConfig, name string) error {
+	if name == "" || name == MainCommunity {
+		return nil
+	}
+	c, ok := cs[name]
+	if !ok {
+		return fmt.Errorf("no community called %q", name)
+	}
+	if err := ValidCommunityName(name); err != nil {
+		return err
+	}
+	if c.Relay == "" {
+		return fmt.Errorf("community %q has no relay", name)
+	}
+	if c.Access != AccessFull {
+		return fmt.Errorf("community %q: access %q is not supported (only %q is built)", name, c.Access, AccessFull)
+	}
+	k := CanonicalRelay(c.Relay)
+	if mainRelay != "" && CanonicalRelay(mainRelay) == k {
+		return fmt.Errorf("community %q is on the same relay as main; one identity on one relay twice answers every mention twice", name)
+	}
+	for other, oc := range cs {
+		if other != name && CanonicalRelay(oc.Relay) == k {
+			return fmt.Errorf("communities %q and %q are on the same relay; one identity on one relay twice answers every mention twice", other, name)
+		}
+	}
+	return nil
+}
+
 // ── editing agent.json without disturbing it ──────────────────────────────────
 //
 // agent.json is hand-edited and read by older binaries. Re-marshalling it
@@ -193,6 +225,7 @@ func topLevelSpan(doc []byte, key string) (start, valStart, end int, found bool,
 	if d, ok := t.(json.Delim); !ok || d != '{' {
 		return 0, 0, 0, false, fmt.Errorf("agent.json is not a JSON object")
 	}
+	seenExact := false
 	for dec.More() {
 		before := int(dec.InputOffset())
 		kt, err := dec.Token()
@@ -200,12 +233,26 @@ func topLevelSpan(doc []byte, key string) (start, valStart, end int, found bool,
 			return 0, 0, 0, false, err
 		}
 		k, _ := kt.(string)
+		// Go's decoder merges a repeated key and matches field names
+		// case-insensitively, so "communities" twice, or "Communities", would
+		// still be read after an edit meant to change or remove it. Such a
+		// file was edited by hand; refuse to guess which one was meant.
+		if strings.EqualFold(k, key) {
+			if k != key {
+				return 0, 0, 0, false, fmt.Errorf("agent.json has a key %q, which reads as %q; rename or remove it by hand first", k, key)
+			}
+			if seenExact {
+				return 0, 0, 0, false, fmt.Errorf("agent.json has %q more than once; remove the duplicate by hand first", key)
+			}
+			seenExact = true
+		}
 		afterKey := int(dec.InputOffset())
 		var raw json.RawMessage
 		if err := dec.Decode(&raw); err != nil {
 			return 0, 0, 0, false, err
 		}
-		if k == key {
+		if k == key && !found {
+			found = true
 			// InputOffset sits after the previous token; skip separators to
 			// land on the key's quote.
 			s := before
@@ -216,20 +263,78 @@ func topLevelSpan(doc []byte, key string) (start, valStart, end int, found bool,
 			for v < len(doc) && (doc[v] == ':' || isSpace(doc[v])) {
 				v++
 			}
-			return s, v, int(dec.InputOffset()), true, nil
+			start, valStart, end = s, v, int(dec.InputOffset())
 		}
 	}
 	if _, err := dec.Token(); err != nil && err != io.EOF {
 		return 0, 0, 0, false, err
 	}
-	return 0, 0, 0, false, nil
+	// Anything after the object would make an append land in the wrong place.
+	if _, err := dec.Token(); err != io.EOF {
+		return 0, 0, 0, false, fmt.Errorf("agent.json has content after its closing brace")
+	}
+	return start, valStart, end, found, nil
 }
 
 func isSpace(b byte) bool { return b == ' ' || b == '\t' || b == '\n' || b == '\r' }
 
 // SetTopLevelKey replaces a top-level key's value, or adds the key at the end
-// of the object, leaving every other byte of the document as it was.
+// of the object, leaving every other byte of the document as it was. The
+// result is checked before it is returned: the key must read back as value,
+// and every other top-level member must be byte-identical to before.
 func SetTopLevelKey(doc []byte, key string, value []byte) ([]byte, error) {
+	out, err := setTopLevelKey(doc, key, value)
+	if err != nil {
+		return nil, err
+	}
+	return out, verifySplice(doc, out, key, value)
+}
+
+// DeleteTopLevelKey removes a top-level key and its separating comma, checked
+// the same way: the key is gone and nothing else changed.
+func DeleteTopLevelKey(doc []byte, key string) ([]byte, error) {
+	out, err := deleteTopLevelKey(doc, key)
+	if err != nil {
+		return nil, err
+	}
+	return out, verifySplice(doc, out, key, nil)
+}
+
+func verifySplice(before, after []byte, key string, want []byte) error {
+	var b, a map[string]json.RawMessage
+	if err := json.Unmarshal(before, &b); err != nil {
+		return err
+	}
+	if err := json.Unmarshal(after, &a); err != nil {
+		return fmt.Errorf("edit would leave agent.json invalid: %w", err)
+	}
+	for k, v := range b {
+		if k == key {
+			continue
+		}
+		if !bytes.Equal(a[k], v) {
+			return fmt.Errorf("edit would change %q in agent.json; refusing", k)
+		}
+	}
+	for k := range a {
+		if _, ok := b[k]; !ok && k != key {
+			return fmt.Errorf("edit would add %q to agent.json; refusing", k)
+		}
+	}
+	got, has := a[key]
+	if want == nil {
+		if has {
+			return fmt.Errorf("%q is still in agent.json after removing it", key)
+		}
+		return nil
+	}
+	if !has || !bytes.Equal(got, want) {
+		return fmt.Errorf("%q does not read back as written", key)
+	}
+	return nil
+}
+
+func setTopLevelKey(doc []byte, key string, value []byte) ([]byte, error) {
 	_, valStart, end, found, err := topLevelSpan(doc, key)
 	if err != nil {
 		return nil, err
@@ -250,8 +355,7 @@ func SetTopLevelKey(doc []byte, key string, value []byte) ([]byte, error) {
 	return concat(body, []byte(sep), kq, []byte(": "), value, []byte("\n"), doc[close:]), nil
 }
 
-// DeleteTopLevelKey removes a top-level key and its separating comma.
-func DeleteTopLevelKey(doc []byte, key string) ([]byte, error) {
+func deleteTopLevelKey(doc []byte, key string) ([]byte, error) {
 	start, _, end, found, err := topLevelSpan(doc, key)
 	if err != nil || !found {
 		return doc, err

@@ -76,12 +76,21 @@ func hexSecret(s string) (string, error) {
 // syncRecordPath is what the last sync of a pair left both sides on: decrypted
 // slugs never go in it, only d tags and event ids, but it lives with the rest
 // of the agent's private files all the same.
+// pairKey names a pair of communities the same whichever way it is synced:
+// the record says what both sides share, which has no direction.
+func pairKey(a, b string) string {
+	if b < a {
+		a, b = b, a
+	}
+	return a + "--" + b
+}
+
 func syncRecordPath(h *host.Host, agent, from, to string) string {
-	return filepath.Join(h.AgentsDir(), agent, "memory-sync", from+"--"+to+".json")
+	return filepath.Join(h.AgentsDir(), agent, "memory-sync", pairKey(from, to)+".json")
 }
 
 func conflictDir(h *host.Host, agent, from, to string) string {
-	return filepath.Join(h.AgentsDir(), agent, "memory-conflicts", from+"--"+to)
+	return filepath.Join(h.AgentsDir(), agent, "memory-conflicts", pairKey(from, to))
 }
 
 func readRecord(p string) map[string]string {
@@ -119,7 +128,7 @@ func syncPair(ctx context.Context, h *host.Host, c *host.AgentConfig, from, to s
 	if !okf || !okt {
 		return res, fmt.Errorf("%s is not in both %q and %q", c.Name, from, to)
 	}
-	if mf.Owner == "" || mf.Owner != mt.Owner {
+	if mf.Owner == "" || !strings.EqualFold(mf.Owner, mt.Owner) {
 		// A different owner means a different memory namespace: copying would
 		// mean re-encrypting for that owner, who could then read all of it.
 		return res, fmt.Errorf("%s has different owners in %s and %s; its memory is not shared between them", c.Name, from, to)
@@ -129,12 +138,9 @@ func syncPair(ctx context.Context, h *host.Host, c *host.AgentConfig, from, to s
 		return res, fmt.Errorf("no usable identity for %s", c.Name)
 	}
 	fetch := func(relay string) (map[string]fleet.Head, error) {
-		hs, n, err := host.FetchHeads(ctx, relay, secret, mf.Owner)
+		hs, _, err := host.FetchHeads(ctx, relay, secret, mf.Owner)
 		if err != nil {
 			return nil, err
-		}
-		if n >= 10000 {
-			return nil, fmt.Errorf("the relay returned %d events, its limit: the listing may be incomplete, so nothing was synced", n)
 		}
 		return fleet.Heads(hs), nil
 	}
@@ -147,10 +153,12 @@ func syncPair(ctx context.Context, h *host.Host, c *host.AgentConfig, from, to s
 		return res, fmt.Errorf("%s: %w", to, err)
 	}
 	recPath := syncRecordPath(h, c.Name, from, to)
+	cdir := conflictDir(h, c.Name, from, to)
 	acts, next := fleet.PlanSync(fh, th, readRecord(recPath), o)
 
 	say := func(format string, a ...any) { res.Lines = append(res.Lines, fmt.Sprintf(format, a...)) }
 	var conflicts []fleet.SyncAction
+	var copied []string
 	for _, a := range acts {
 		switch a.Kind {
 		case fleet.ActInSync:
@@ -194,25 +202,48 @@ func syncPair(ctx context.Context, h *host.Host, c *host.AgentConfig, from, to s
 			if err := host.PublishEngram(ctx, dst, secret, raw); err != nil {
 				return res, fmt.Errorf("%s to %s: %w", a.Slug, dstName, err)
 			}
-			res.Copied++
+			copied = append(copied, a.D)
 		}
 	}
 	if dry {
 		return res, nil
 	}
-	// Record what both sides now share, read back rather than assumed: a
-	// relay may have refused a write, and a re-published head has a new id.
+	// The record is what both sides are read back sharing, never what was
+	// planned: a relay that refuses a write as superseded still answers OK,
+	// and a re-published head has a new id. Only a memory still in conflict,
+	// or left newer on one side, keeps its previous record.
 	fh2, err := fetch(mf.Relay)
-	if err == nil {
-		if th2, err2 := fetch(mt.Relay); err2 == nil {
-			for d, a := range fh2 {
-				if b, ok := th2[d]; ok && a.ID == b.ID {
-					next[d] = a.ID
-				}
-			}
+	if err != nil {
+		return res, fmt.Errorf("%s: reading back: %w", from, err)
+	}
+	th2, err := fetch(mt.Relay)
+	if err != nil {
+		return res, fmt.Errorf("%s: reading back: %w", to, err)
+	}
+	record := map[string]string{}
+	shared := map[string]bool{}
+	for d, a := range fh2 {
+		if b, ok := th2[d]; ok && a.ID == b.ID {
+			record[d], shared[d] = a.ID, true
 		}
 	}
-	rec, _ := json.MarshalIndent(next, "", "  ")
+	for _, a := range acts {
+		if (a.Kind == fleet.ActConflict || a.Kind == fleet.ActKeepTo) && !shared[a.D] && next[a.D] != "" {
+			record[a.D] = next[a.D]
+		}
+		// A conflict that has since been settled leaves no file behind.
+		if shared[a.D] {
+			_ = os.Remove(filepath.Join(cdir, strings.ReplaceAll(a.Slug, "/", "__")+".json"))
+		}
+	}
+	for _, d := range copied {
+		if shared[d] {
+			res.Copied++
+		} else {
+			res.Lines = append(res.Lines, fmt.Sprintf("  a copy was not taken by the relay (%s…); the next sync tries again", d[:12]))
+		}
+	}
+	rec, _ := json.MarshalIndent(record, "", "  ")
 	if err := writePrivate(recPath, rec); err != nil {
 		return res, err
 	}
@@ -224,7 +255,9 @@ func syncPair(ctx context.Context, h *host.Host, c *host.AgentConfig, from, to s
 			to:        map[string]any{"event": a.To.ID, "created_at": a.To.CreatedAt, "body": json.RawMessage(a.To.Plain)},
 			"resolve": fmt.Sprintf("buzzfleet memory sync %s --from %s --to %s --resolve %s=from|to", c.Name, from, to, a.Slug),
 		}, "", "  ")
-		_ = writePrivate(filepath.Join(conflictDir(h, c.Name, from, to), strings.ReplaceAll(a.Slug, "/", "__")+".json"), body)
+		if !shared[a.D] {
+			_ = writePrivate(filepath.Join(cdir, strings.ReplaceAll(a.Slug, "/", "__")+".json"), body)
+		}
 	}
 	return res, nil
 }

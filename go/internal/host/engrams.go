@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/mdmohsin7/buzzfleet/internal/fleet"
@@ -43,6 +44,9 @@ func connectAs(ctx context.Context, relay, secret string) (*nostr.Relay, error) 
 // decrypts and parses, and a slug that re-derives to the event's d tag. It
 // returns how many events the relay sent, so a capped listing can be seen.
 func FetchHeads(ctx context.Context, relay, secret, owner string) ([]fleet.Head, int, error) {
+	// Tags are compared exactly, and relays treat hex case-insensitively:
+	// an owner written in upper case would otherwise match nothing.
+	owner = strings.ToLower(owner)
 	agent, err := nostr.GetPublicKey(secret)
 	if err != nil {
 		return nil, 0, err
@@ -56,12 +60,12 @@ func FetchHeads(ctx context.Context, relay, secret, owner string) ([]fleet.Head,
 		return nil, 0, err
 	}
 	defer r.Close()
-	evs, err := r.QuerySync(ctx, nostr.Filter{
+	evs, err := paginate(func(f nostr.Filter) ([]*nostr.Event, error) { return r.QuerySync(ctx, f) }, nostr.Filter{
 		Kinds: []int{fleet.EngramKind}, Authors: []string{agent},
-		Tags: nostr.TagMap{"p": []string{owner}}, Limit: 10000,
-	})
+		Tags: nostr.TagMap{"p": []string{owner}},
+	}, engramPage)
 	if err != nil {
-		return nil, 0, fmt.Errorf("query: %w", err)
+		return nil, 0, err
 	}
 	var out []fleet.Head
 	for _, ev := range evs {
@@ -70,6 +74,47 @@ func FetchHeads(ctx context.Context, relay, secret, owner string) ([]fleet.Head,
 		}
 	}
 	return out, len(evs), nil
+}
+
+// A Buzz relay caps every query at a page (1000 events), whatever limit is
+// asked for, and says nothing when it does. So listing is paged with
+// `until`, newest first, until a page comes back short. Pages overlap on
+// their boundary second and are de-duplicated by id; a page that adds
+// nothing new while still full means more than a page's worth of events
+// share one second, and the listing cannot be completed.
+const engramPage = 500
+
+func paginate(query func(nostr.Filter) ([]*nostr.Event, error), base nostr.Filter, page int) ([]*nostr.Event, error) {
+	seen := map[string]bool{}
+	var out []*nostr.Event
+	f := base
+	f.Limit = page
+	for {
+		evs, err := query(f)
+		if err != nil {
+			return nil, fmt.Errorf("query: %w", err)
+		}
+		oldest := nostr.Timestamp(0)
+		added := 0
+		for _, ev := range evs {
+			if !seen[ev.ID] {
+				seen[ev.ID] = true
+				out = append(out, ev)
+				added++
+			}
+			if oldest == 0 || ev.CreatedAt < oldest {
+				oldest = ev.CreatedAt
+			}
+		}
+		if len(evs) < page {
+			return out, nil
+		}
+		if added == 0 {
+			return nil, fmt.Errorf("more than %d memory events share one second; the listing cannot be completed, so nothing was synced", page)
+		}
+		until := oldest
+		f.Until = &until
+	}
 }
 
 func validEngram(ev *nostr.Event, agent, owner string, key [32]byte) (fleet.Head, bool) {

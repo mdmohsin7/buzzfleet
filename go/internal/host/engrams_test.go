@@ -1,6 +1,7 @@
 package host
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/mdmohsin7/buzzfleet/internal/fleet"
@@ -63,5 +64,81 @@ func TestResignBeatsTheOtherHead(t *testing.T) {
 	got, ok := validEngram(&ev, ev.PubKey, owner, key)
 	if !ok || got.Slug != "mem/example" || got.Plain != h.Plain || got.CreatedAt != 4000000001 {
 		t.Fatalf("re-signed: %+v", got)
+	}
+}
+
+// signed builds an engram as the spec's test agent would publish it, so
+// each test fails for its own reason and not on a broken signature.
+func signed(t *testing.T, tags nostr.Tags, plain string) *nostr.Event {
+	t.Helper()
+	secA := "0000000000000000000000000000000000000000000000000000000000000001"
+	owner := "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
+	key, _ := nip44.GenerateConversationKey(owner, secA)
+	content, _ := nip44.Encrypt(plain, key)
+	ev := nostr.Event{Kind: 30174, CreatedAt: 1700000100, Tags: tags, Content: content}
+	if err := ev.Sign(secA); err != nil {
+		t.Fatal(err)
+	}
+	return &ev
+}
+
+func TestValidEngramRulesEachOnTheirOwn(t *testing.T) {
+	secA := "0000000000000000000000000000000000000000000000000000000000000001"
+	owner := "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
+	agent, _ := nostr.GetPublicKey(secA)
+	key, _ := nip44.GenerateConversationKey(owner, secA)
+	body := `{"slug":"mem/example","value":"v"}`
+	d := fleet.DTag(key, "mem/example")
+
+	if _, ok := validEngram(signed(t, nostr.Tags{{"d", d}, {"p", owner}}, body), agent, owner, key); !ok {
+		t.Fatal("a well-formed signed engram is valid")
+	}
+	for name, ev := range map[string]*nostr.Event{
+		"d tag of another slug": signed(t, nostr.Tags{{"d", fleet.DTag(key, "mem/other")}, {"p", owner}}, body),
+		"two d tags":            signed(t, nostr.Tags{{"d", d}, {"d", d}, {"p", owner}}, body),
+		"two p tags":            signed(t, nostr.Tags{{"d", d}, {"p", owner}, {"p", owner}}, body),
+		"no p tag":              signed(t, nostr.Tags{{"d", d}}, body),
+		"duplicate body key":    signed(t, nostr.Tags{{"d", d}, {"p", owner}}, `{"slug":"mem/example","value":"v","value":"w"}`),
+	} {
+		if _, ok := validEngram(ev, agent, owner, key); ok {
+			t.Fatalf("%s must be invalid", name)
+		}
+	}
+}
+
+func TestPaginateReadsPastTheRelaysPageCap(t *testing.T) {
+	// A relay that silently returns at most cap events, newest first,
+	// honouring until (inclusive), as Buzz does with its 1000-event page.
+	var all []*nostr.Event
+	for i := 0; i < 23; i++ {
+		all = append(all, &nostr.Event{ID: fmt.Sprintf("e%02d", i), CreatedAt: nostr.Timestamp(1000 + i/2)})
+	}
+	relay := func(cap int) func(nostr.Filter) ([]*nostr.Event, error) {
+		return func(f nostr.Filter) ([]*nostr.Event, error) {
+			var out []*nostr.Event
+			for i := len(all) - 1; i >= 0; i-- {
+				if f.Until != nil && all[i].CreatedAt > *f.Until {
+					continue
+				}
+				out = append(out, all[i])
+				if len(out) == cap || len(out) == f.Limit {
+					break
+				}
+			}
+			return out, nil
+		}
+	}
+	got, err := paginate(relay(5), nostr.Filter{}, 5)
+	if err != nil || len(got) != 23 {
+		t.Fatalf("got %d events (%v), want all 23 past a cap of 5", len(got), err)
+	}
+	// A second holding more than a page cannot be paged through.
+	same := make([]*nostr.Event, 7)
+	for i := range same {
+		same[i] = &nostr.Event{ID: fmt.Sprintf("s%d", i), CreatedAt: 1}
+	}
+	all = same
+	if _, err := paginate(relay(5), nostr.Filter{}, 5); err == nil {
+		t.Fatal("an unfinishable listing must fail, not come back short")
 	}
 }

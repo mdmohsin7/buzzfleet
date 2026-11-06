@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -355,7 +356,10 @@ func procEnv(pid string) map[string]string {
 // key and one relay both answer every mention, and a restart cannot reach the
 // stray. The same key on two relays is an agent in two communities, and fine.
 func (h *Host) Harnesses(derive func(string) (string, error)) []Proc {
-	out, err := exec.Command("ps", "-eo", "pid=,args=").Output()
+	// Only this user's processes. Another user's fleet on the same host has
+	// its own supervisor; its harnesses are not strays of this one, and
+	// reaping them would kill a healthy agent.
+	out, err := exec.Command("ps", "-u", strconv.Itoa(os.Getuid()), "-o", "pid=,args=").Output()
 	if err != nil {
 		return nil
 	}

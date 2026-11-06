@@ -21,6 +21,9 @@ func cmdPeek(h *host.Host, args []string) {
 		agent, args, operator = args[1], args[2:], true
 	}
 	self := fleet.ParseInstance(os.Getenv("BUZZ_FLEET_HARNESS"))
+	if err := peekAgentAllowed(self.Agent, agent, operator); err != nil {
+		die("%v", err)
+	}
 	if agent == "" {
 		agent = self.Agent
 	}
@@ -62,6 +65,16 @@ func cmdPeek(h *host.Host, args []string) {
 		}
 		die("%v", err)
 	}
+}
+
+// peekAgentAllowed: from inside a harness, peek reads only as that harness's
+// own agent. --agent is for an operator at a shell, not for one agent to
+// read as another.
+func peekAgentAllowed(selfAgent, agent string, operator bool) error {
+	if operator && selfAgent != "" && agent != selfAgent {
+		return fmt.Errorf("peek runs inside %s's harness and reads only as %s, not as %s", selfAgent, selfAgent, agent)
+	}
+	return nil
 }
 
 // peekSecret picks the key peek reads with: the agent's, and nobody else's.

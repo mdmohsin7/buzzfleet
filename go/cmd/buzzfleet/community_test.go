@@ -271,3 +271,12 @@ func TestPeekReadsOnlyAsTheAgent(t *testing.T) {
 		t.Fatal("no key in the environment: the agent's from its identity file")
 	}
 }
+
+func TestPeekInsideAHarnessIsThatAgentOnly(t *testing.T) {
+	if peekAgentAllowed("agent-a", "agent-b", true) == nil {
+		t.Fatal("one agent must not peek as another")
+	}
+	if peekAgentAllowed("agent-a", "agent-a", true) != nil || peekAgentAllowed("", "agent-b", true) != nil || peekAgentAllowed("agent-a", "", false) != nil {
+		t.Fatal("its own agent, or an operator outside any harness, is fine")
+	}
+}

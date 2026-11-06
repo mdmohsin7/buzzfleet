@@ -13,8 +13,11 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mdmohsin7/buzzfleet/internal/fleet"
 )
 
 type Host struct {
@@ -133,6 +136,88 @@ type AgentConfig struct {
 	AgentCommand string `json:"agentCommand"`
 	RespondTo    string `json:"respondTo"`
 	Owner        string `json:"owner"`
+
+	// Communities beyond the one the agent was created in, whose settings
+	// are the fields above. See docs/design/multi-community.md.
+	Communities map[string]fleet.CommunityConfig `json:"communities,omitempty"`
+}
+
+// Membership is what one harness needs to know about its community.
+type Membership struct {
+	Relay, Owner, RespondTo string
+}
+
+// In returns the agent's settings in one community. Fields a community
+// leaves empty fall back to the main community's.
+func (c *AgentConfig) In(community string) (Membership, bool) {
+	m := Membership{Relay: c.Relay, Owner: c.Owner, RespondTo: c.RespondTo}
+	if community == "" || community == fleet.MainCommunity {
+		return m, true
+	}
+	cc, ok := c.Communities[community]
+	if !ok {
+		return Membership{}, false
+	}
+	m.Relay = cc.Relay
+	if cc.Owner != "" {
+		m.Owner = cc.Owner
+	}
+	if cc.RespondTo != "" {
+		m.RespondTo = cc.RespondTo
+	}
+	return m, true
+}
+
+// Harnesses lists the agent's harnesses: the main community first, then the
+// others by name.
+func (c *AgentConfig) Harnesses() []fleet.Harness {
+	out := []fleet.Harness{{Agent: c.Name, Community: fleet.MainCommunity}}
+	names := make([]string, 0, len(c.Communities))
+	for n := range c.Communities {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		out = append(out, fleet.Harness{Agent: c.Name, Community: n})
+	}
+	return out
+}
+
+func (h *Host) agentFile(name string) string {
+	return filepath.Join(h.AgentsDir(), name, "agent.json")
+}
+
+// RawAgentConfig is agent.json exactly as it is on disk, for edits that must
+// not disturb anything they do not mean to change.
+func (h *Host) RawAgentConfig(name string) ([]byte, error) {
+	return os.ReadFile(h.agentFile(name))
+}
+
+// WriteRawAgentConfig replaces agent.json atomically, keeping its mode.
+func (h *Host) WriteRawAgentConfig(name string, b []byte) error {
+	p := h.agentFile(name)
+	mode := os.FileMode(0o644)
+	if fi, err := os.Stat(p); err == nil {
+		mode = fi.Mode().Perm()
+	}
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, b, mode); err != nil {
+		return err
+	}
+	return os.Rename(tmp, p)
+}
+
+// AllHarnesses lists every harness of every agent on this host.
+func (h *Host) AllHarnesses() []fleet.Harness {
+	var out []fleet.Harness
+	for _, n := range h.Agents() {
+		if c, err := h.AgentConfig(n); err == nil {
+			out = append(out, c.Harnesses()...)
+		} else {
+			out = append(out, fleet.Harness{Agent: n, Community: fleet.MainCommunity})
+		}
+	}
+	return out
 }
 
 func (h *Host) Agents() []string {
@@ -154,13 +239,16 @@ func (h *Host) Agents() []string {
 }
 
 func (h *Host) AgentConfig(name string) (*AgentConfig, error) {
-	b, err := os.ReadFile(filepath.Join(h.AgentsDir(), name, "agent.json"))
+	b, err := os.ReadFile(h.agentFile(name))
 	if err != nil {
 		return nil, fmt.Errorf("no such agent: %s", name)
 	}
 	var c AgentConfig
 	if err := json.Unmarshal(b, &c); err != nil {
 		return nil, fmt.Errorf("%s: unreadable agent.json: %w", name, err)
+	}
+	if c.Name == "" {
+		c.Name = name
 	}
 	return &c, nil
 }
@@ -233,23 +321,51 @@ func (h *Host) ChildAlive(name string) (alive bool, known bool) {
 type Proc struct {
 	PID        string
 	Agent      string
+	Instance   string // the harness's unit instance, when it says
+	Pubkey     string // from its environment, when readable
+	Relay      string // canonical; the community it is connected to
 	Supervised bool
 }
 
 var harnessRe = regexp.MustCompile(`^(\d+)\s+(.*buzz-acp\b.*)$`)
 var promptRe = regexp.MustCompile(`agents/([^/]+)/system-prompt\.md`)
 
-// Harnesses lists every buzz-acp process, tagged with whether systemd owns it.
+// procEnv reads the variables that identify a harness from its environment.
+func procEnv(pid string) map[string]string {
+	b, err := os.ReadFile("/proc/" + pid + "/environ")
+	if err != nil {
+		return nil
+	}
+	out := map[string]string{}
+	for _, kv := range strings.Split(string(b), "\x00") {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		switch k {
+		case "BUZZ_FLEET_HARNESS", "BUZZ_PUBLIC_KEY", "BUZZ_PRIVATE_KEY", "BUZZ_RELAY_URL":
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// Harnesses lists every buzz-acp process, tagged with whether systemd owns it
+// and, where its environment is readable, which identity and relay it runs as.
 // Unsupervised ones are what produce duplicate replies: two harnesses on one
-// key both answer every mention, and a restart cannot reach the stray.
-func (h *Host) Harnesses() []Proc {
-	out, err := exec.Command("ps", "-eo", "pid=,args=").Output()
+// key and one relay both answer every mention, and a restart cannot reach the
+// stray. The same key on two relays is an agent in two communities, and fine.
+func (h *Host) Harnesses(derive func(string) (string, error)) []Proc {
+	// Only this user's processes. Another user's fleet on the same host has
+	// its own supervisor; its harnesses are not strays of this one, and
+	// reaping them would kill a healthy agent.
+	out, err := exec.Command("ps", "-u", strconv.Itoa(os.Getuid()), "-o", "pid=,args=").Output()
 	if err != nil {
 		return nil
 	}
 	supervised := map[string]bool{}
-	for _, n := range h.Agents() {
-		if pid := h.MainPID(n); pid != "" {
+	for _, hn := range h.AllHarnesses() {
+		if pid := h.MainPID(hn.Instance()); pid != "" {
 			supervised[pid] = true
 		}
 	}
@@ -262,13 +378,38 @@ func (h *Host) Harnesses() []Proc {
 		if strings.HasPrefix(m[2], "/bin/bash") || strings.Contains(m[2], "buzz-agent-run") {
 			continue
 		}
-		agent := "unknown"
+		p := Proc{PID: m[1], Agent: "unknown", Supervised: supervised[m[1]]}
 		if pm := promptRe.FindStringSubmatch(m[2]); pm != nil {
-			agent = pm[1]
+			p.Agent = pm[1]
 		}
-		procs = append(procs, Proc{PID: m[1], Agent: agent, Supervised: supervised[m[1]]})
+		env := procEnv(m[1])
+		if inst := env["BUZZ_FLEET_HARNESS"]; inst != "" {
+			p.Instance = inst
+			p.Agent = fleet.ParseInstance(inst).Agent
+		}
+		p.Pubkey = env["BUZZ_PUBLIC_KEY"]
+		if p.Pubkey == "" && env["BUZZ_PRIVATE_KEY"] != "" && derive != nil {
+			p.Pubkey, _ = derive(env["BUZZ_PRIVATE_KEY"])
+		}
+		if r := env["BUZZ_RELAY_URL"]; r != "" {
+			p.Relay = fleet.CanonicalRelay(r)
+		}
+		procs = append(procs, p)
 	}
 	return procs
+}
+
+// DuplicateKey is what two harnesses must not share: one identity on one
+// relay. Without a readable environment, fall back to the agent name, which is
+// what duplicates were keyed by before communities.
+func (p Proc) DuplicateKey() string {
+	if p.Pubkey != "" && p.Relay != "" {
+		return p.Pubkey + " " + p.Relay
+	}
+	if p.Instance != "" {
+		return "instance " + p.Instance
+	}
+	return "agent " + p.Agent
 }
 
 // ── buzz CLI ──────────────────────────────────────────────────────────────────

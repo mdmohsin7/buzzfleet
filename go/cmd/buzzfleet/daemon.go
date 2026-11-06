@@ -263,12 +263,17 @@ func handleCommand(h *host.Host, cfg *fleet.Config, text string) string {
 		return hostPrefix + block(healthText(h, cfg))
 	case "restart", "start", "stop":
 		if arg == "" {
-			return fmt.Sprintf("usage: `%s <agent>`", verb)
+			return fmt.Sprintf("usage: `%s <agent>[@community]`", verb)
+		}
+		// Resolved here rather than inside the CLI path, which exits on an
+		// unknown name: a typo in chat must not take the supervisor down.
+		if _, err := resolve(h, arg); err != nil {
+			return fmt.Sprintf("`%v`", err)
 		}
 		return hostPrefix + block(capture(func() { cmdLifecycle(h, verb, []string{arg}) }))
 	case "logs":
 		if arg == "" {
-			return "usage: `logs <agent> [lines]`"
+			return "usage: `logs <agent>[@community] [lines]`"
 		}
 		n := "25"
 		if len(args) > 1 {
@@ -276,7 +281,14 @@ func handleCommand(h *host.Host, cfg *fleet.Config, text string) string {
 				n = args[1]
 			}
 		}
-		out := h.Journal(arg, n)
+		ts, err := resolve(h, arg)
+		if err != nil {
+			return fmt.Sprintf("`%v`", err)
+		}
+		if len(ts) > 1 {
+			return fmt.Sprintf("%s is in several communities; say which, e.g. `logs %s`", arg, ts[1].Label)
+		}
+		out := h.Journal(ts[0].Instance(), n)
 		lines := strings.Split(strings.TrimSpace(out), "\n")
 		if len(lines) > 30 {
 			lines = lines[len(lines)-30:]
@@ -322,7 +334,7 @@ func helpText(cfg *fleet.Config) string {
 		"health              is each agent actually reachable on the relay\n"+
 		"restart <agent>     atomic; cannot orphan a second harness\n"+
 		"start|stop <agent>\n"+
-		"logs <agent> [n]    recent journal lines\n"+
+		"logs <agent>[@c] [n] recent journal lines\n"+
 		"doctor              duplicates, permissions, membership, limits\n"+
 		"```\nAddress me as `@%s`%s. Only the owner is obeyed.",
 		cfg.Name, cfg.Host, cfg.Name, broadcast)

@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/mdmohsin7/buzzfleet/internal/fleet"
 	"github.com/mdmohsin7/buzzfleet/internal/host"
 	"github.com/nbd-wtf/go-nostr"
 )
@@ -31,6 +32,9 @@ func cmdAdd(h *host.Host, args []string) {
 	if !handleRe.MatchString(name) {
 		die("name must be lowercase letters, digits, - or _ (it names a directory and a systemd unit).\n" +
 			"Use --display-name for what shows in Buzz.")
+	}
+	if err := fleet.ValidAgentName(name); err != nil {
+		die("%v", err)
 	}
 	dir := filepath.Join(h.AgentsDir(), name)
 	if _, err := os.Stat(dir); err == nil {
@@ -204,9 +208,13 @@ func cmdRename(h *host.Host, args []string) {
 	if sk == "" {
 		die("%s has no identity on this host", target)
 	}
-	if _, err := h.Buzz(sk, ac.Relay, "users", "set-profile",
-		"--name", display, "--about", "Engineering agent in "+ac.Workdir); err != nil {
-		die("could not publish profile: %v", err)
+	// A profile is per community, so set it in every one the agent is in.
+	for _, hn := range ac.Harnesses() {
+		m, _ := ac.In(hn.Community)
+		if _, err := h.Buzz(sk, m.Relay, "users", "set-profile",
+			"--name", display, "--about", "Engineering agent in "+ac.Workdir); err != nil {
+			die("could not publish profile in %s: %v", hn.Label(true), err)
+		}
 	}
 	fmt.Printf("%s now shows as %q in Buzz\n", target, display)
 	fmt.Printf("note: it still answers to @%s — the handle is unchanged\n", target)

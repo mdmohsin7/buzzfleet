@@ -143,6 +143,23 @@ func TestClampLowercaseFieldsCannotSlipPast(t *testing.T) {
 	}
 }
 
+func TestClampLabelsTheCommunity(t *testing.T) {
+	out, _, err := ClampContainerFor("create", []byte(`{}`), testCaps, "agent-a", "b", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	_ = json.Unmarshal(out, &doc)
+	labels := doc["Labels"].(map[string]any)
+	if labels[LabelAgent] != "agent-a" || labels[LabelCommunity] != "b" {
+		t.Fatalf("labels: %v", labels)
+	}
+	out, _, _ = ClampContainer("create", []byte(`{}`), testCaps, "agent-a", 1)
+	if strings.Contains(string(out), LabelCommunity) {
+		t.Fatal("a single-community agent's containers carry no community label")
+	}
+}
+
 func TestClampLowercaseLabelsCannotSpoofTheAgent(t *testing.T) {
 	out, _, err := ClampContainer("create", []byte(`{"labels":{"buzzfleet.agent":"someone-else","keep":"me"}}`), testCaps, "agent-a", 1)
 	if err != nil {

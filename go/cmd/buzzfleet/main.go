@@ -25,11 +25,15 @@ const usage = `buzzfleet — run and supervise Buzz agents on this machine
 
   status [name...]              agents: unit state, uptime, relay health
   health                        is each agent actually present on the relay
-  start|stop|restart <agent>    lifecycle (systemd; restart cannot orphan)
-  logs <agent> [-n N]           recent journal output
+  start|stop|restart <agent>[@community]
+                                lifecycle (systemd; restart cannot orphan)
+  logs <agent>[@community] [-n N]  recent journal output
   doctor                        duplicates, permissions, membership
   reap [--dry-run]              kill harnesses systemd is not supervising
   limits [--apply]              cap the CPU and memory all agents can use
+  community add <agent> <name> --invite <code> --relay <url> --access full
+                                run the agent in another community too
+  community rm <agent> <name> | community ls [agent]
   heartbeat [--send]            show, or send once, the out-of-band heartbeat
   add <name> --workdir <path> --invite <code> [--display-name "..."]
        [--prompt "..." | --prompt-file <path>]
@@ -104,6 +108,8 @@ func main() {
 		cmdReap(h, args)
 	case "limits":
 		cmdLimits(h, args)
+	case "community":
+		cmdCommunity(h, args)
 	case "heartbeat":
 		cmdHeartbeat(h, args)
 	case "channels":
@@ -166,58 +172,112 @@ func mustConfig(h *host.Host) *fleet.Config {
 // ── status and health ─────────────────────────────────────────────────────────
 
 func cmdStatus(h *host.Host, args []string) {
-	names := args
-	if len(names) == 0 {
-		names = h.Agents()
+	var ts []target
+	if len(args) == 0 {
+		ts = allTargets(h)
 	}
-	if len(names) == 0 {
+	for _, a := range args {
+		ts = append(ts, mustResolve(h, a)...)
+	}
+	if len(ts) == 0 {
 		fmt.Println("no agents configured")
 		return
 	}
-	fmt.Printf("%-12s%-10s%-6s%-9s%-7s%s\n", "AGENT", "STATE", "BOOT", "PID", "UP", "WORKDIR")
-	for _, n := range names {
-		c, err := h.AgentConfig(n)
-		if err != nil {
-			die("%v", err)
-		}
-		state := h.UnitState(n)
-		pid := h.MainPID(n)
+	fmt.Printf("%-16s%-10s%-6s%-9s%-7s%s\n", "AGENT", "STATE", "BOOT", "PID", "UP", "WORKDIR")
+	for _, t := range ts {
+		inst := t.Instance()
+		state := h.UnitState(inst)
+		pid := h.MainPID(inst)
 		if pid == "" {
 			pid = "-"
 		}
 		up := "-"
 		if state == "active" {
-			up = h.Uptime(n)
+			up = h.Uptime(inst)
 		}
 		boot := "no"
-		if h.UnitEnabled(n) {
+		if h.UnitEnabled(inst) {
 			boot = "yes"
 		}
-		fmt.Printf("%-12s%-10s%-6s%-9s%-7s%s\n", n, state, boot, pid, up, c.Workdir)
+		wd := "-"
+		if t.Config != nil {
+			wd = t.Config.Workdir
+		}
+		fmt.Printf("%-16s%-10s%-6s%-9s%-7s%s\n", t.Label, state, boot, pid, up, wd)
 	}
 }
 
-// assessAll gathers one reading per agent, with a single relay call for the lot.
+// assessAll gathers one reading per harness, with one relay call per
+// community for the lot.
+//
+// Presence lives on each community's relay. The supervisor's own identity is
+// only a member of the community it was set up in, so presence elsewhere is
+// asked as one of the agents that is a member there: any member may read it.
 func assessAll(h *host.Host, cfg *fleet.Config) []fleet.Assessment {
-	names := h.Agents()
-	pubkeys := map[string]string{}
-	var list []string
-	for _, n := range names {
-		if pk := h.AgentPubkey(n, derivePubkey); pk != "" {
-			pubkeys[n] = pk
-			list = append(list, pk)
-		}
+	ts := allTargets(h)
+	pubkeys := map[string]string{} // agent -> pubkey
+	type relayQuery struct {
+		asSecret string
+		pubkeys  []string
 	}
-	online, err := h.PresenceOf(cfg.PrivateKey, cfg.Relay, list)
+	queries := map[string]*relayQuery{} // canonical relay -> query
+	mainRelay := fleet.CanonicalRelay(cfg.Relay)
+	for _, t := range ts {
+		pk, ok := pubkeys[t.Agent]
+		if !ok {
+			pk = h.AgentPubkey(t.Agent, derivePubkey)
+			pubkeys[t.Agent] = pk
+		}
+		if pk == "" || t.Relay == "" {
+			continue
+		}
+		r := fleet.CanonicalRelay(t.Relay)
+		q := queries[r]
+		if q == nil {
+			q = &relayQuery{}
+			if r == mainRelay {
+				q.asSecret = cfg.PrivateKey
+			} else {
+				q.asSecret = h.AgentSecret(t.Agent)
+			}
+			queries[r] = q
+		}
+		q.pubkeys = append(q.pubkeys, pk)
+	}
+	type answer struct {
+		online map[string]bool
+		err    error
+	}
+	answers := map[string]answer{}
+	for r, q := range queries {
+		relay := r
+		if r == mainRelay {
+			relay = cfg.Relay
+		} else {
+			for _, t := range ts {
+				if fleet.CanonicalRelay(t.Relay) == r {
+					relay = t.Relay
+					break
+				}
+			}
+		}
+		online, err := h.PresenceOf(q.asSecret, relay, q.pubkeys)
+		answers[r] = answer{online, err}
+	}
 
-	out := make([]fleet.Assessment, 0, len(names))
-	for _, n := range names {
-		unit := h.UnitState(n)
-		pk, hasID := pubkeys[n]
+	// One model login per agent: a usage limit or a dead login is the
+	// agent's, so it is read once and shown on every one of its harnesses.
+	inference := map[string][2]string{}
+	out := make([]fleet.Assessment, 0, len(ts))
+	for _, t := range ts {
+		inst := t.Instance()
+		unit := h.UnitState(inst)
+		pk := pubkeys[t.Agent]
+		hasID := pk != ""
 
 		present := fleet.TriUnknown
-		if err == nil && hasID {
-			if online[pk] {
+		if ans, ok := answers[fleet.CanonicalRelay(t.Relay)]; ok && ans.err == nil && hasID {
+			if ans.online[pk] {
 				present = fleet.TriYes
 			} else {
 				present = fleet.TriNo
@@ -225,7 +285,7 @@ func assessAll(h *host.Host, cfg *fleet.Config) []fleet.Assessment {
 		}
 		child := fleet.TriUnknown
 		if unit == "active" && present == fleet.TriYes {
-			if alive, known := h.ChildAlive(n); known {
+			if alive, known := h.ChildAlive(inst); known {
 				if alive {
 					child = fleet.TriYes
 				} else {
@@ -233,12 +293,17 @@ func assessAll(h *host.Host, cfg *fleet.Config) []fleet.Assessment {
 				}
 			}
 		}
-		a := fleet.Assess(n, unit, present, child, hasID)
+		a := assessTarget(t, unit, present, child, hasID)
 		// Only worth reading transcripts for an agent that otherwise looks
 		// fine: that is the one whose failing turns nothing else would catch.
 		if a.State == fleet.StateOK {
-			st, detail := fleet.InferenceState(fleet.Latest(h.InferenceSignals(n)), time.Now())
-			a = fleet.WithInference(a, st, detail)
+			inf, done := inference[t.Agent]
+			if !done {
+				st, detail := fleet.InferenceState(fleet.Latest(h.InferenceSignals(t.Agent)), time.Now())
+				inf = [2]string{string(st), detail}
+				inference[t.Agent] = inf
+			}
+			a = fleet.WithInference(a, fleet.State(inf[0]), inf[1])
 		}
 		out = append(out, a)
 	}
@@ -252,7 +317,7 @@ func healthText(h *host.Host, cfg *fleet.Config) string {
 	}
 	var b strings.Builder
 	for _, r := range rows {
-		fmt.Fprintf(&b, "%-12s%-9s%s\n", r.Name, r.State, r.Detail)
+		fmt.Fprintf(&b, "%-16s%-9s%s\n", r.Name, r.State, r.Detail)
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
@@ -261,39 +326,47 @@ func healthText(h *host.Host, cfg *fleet.Config) string {
 
 func cmdLifecycle(h *host.Host, verb string, args []string) {
 	if len(args) == 0 {
-		die("usage: buzzfleet %s <agent>", verb)
+		die("usage: buzzfleet %s <agent>[@community]", verb)
 	}
-	name := args[0]
-	if _, err := h.AgentConfig(name); err != nil {
-		die("%v", err)
+	for _, t := range mustResolve(h, args[0]) {
+		lifecycleOne(h, verb, t)
 	}
-	h.Systemctl(verb, host.UnitFor(name))
-	state := h.UnitState(name)
+}
+
+func lifecycleOne(h *host.Host, verb string, t target) {
+	inst := t.Instance()
+	h.Systemctl(verb, host.UnitFor(inst))
+	state := h.UnitState(inst)
 
 	if verb != "restart" {
-		fmt.Printf("%s: %s\n", name, state)
+		fmt.Printf("%s: %s\n", t.Label, state)
 		return
 	}
 	// systemd tears down the whole control group, so a restart cannot leave the
 	// old harness alive — but verify rather than trust, because assuming a kill
 	// worked is exactly what produced duplicate replies by hand.
 	var strays []string
-	for _, p := range h.Harnesses() {
-		if p.Agent == name && !p.Supervised {
+	for _, p := range h.Harnesses(derivePubkey) {
+		if p.Supervised || p.Agent != t.Agent {
+			continue
+		}
+		// A stray counts against this harness if it says it is this harness,
+		// or if it is on this harness's relay.
+		if p.Instance == inst || (p.Instance == "" && (p.Relay == "" || p.Relay == fleet.CanonicalRelay(t.Relay))) {
 			strays = append(strays, p.PID)
 		}
 	}
 	if len(strays) > 0 {
 		fmt.Printf("%s: %s, but %d unsupervised harness(es) remain (%s) — run `buzzfleet doctor`\n",
-			name, state, len(strays), strings.Join(strays, ", "))
+			t.Label, state, len(strays), strings.Join(strays, ", "))
 		return
 	}
-	fmt.Printf("%s: %s, single harness confirmed\n", name, state)
+	fmt.Printf("%s: %s, single harness confirmed\n", t.Label, state)
 }
 
 func cmdLogs(h *host.Host, args []string) {
 	if len(args) == 0 {
-		die("usage: buzzfleet logs <agent> [-n N]")
+		die("usage: buzzfleet logs <agent>[@community] [-n N]")
 	}
 	n := "40"
 	for i, a := range args {
@@ -301,7 +374,7 @@ func cmdLogs(h *host.Host, args []string) {
 			n = args[i+1]
 		}
 	}
-	fmt.Println(h.Journal(args[0], n))
+	fmt.Println(h.Journal(mustOne(h, args[0], "logs").Instance(), n))
 }
 
 // ── doctor and reap ───────────────────────────────────────────────────────────
@@ -317,16 +390,20 @@ func cmdDoctor(h *host.Host) {
 		fmt.Printf("%s %s\n", tag, msg)
 	}
 
-	byAgent := map[string][]host.Proc{}
-	procs := h.Harnesses()
-	for _, p := range procs {
-		byAgent[p.Agent] = append(byAgent[p.Agent], p)
-	}
+	// One identity on one relay must have exactly one harness. The same
+	// identity on two relays is one agent in two communities, which is fine.
+	procs := h.Harnesses(derivePubkey)
+	keys, byKey := groupHarnesses(procs)
 	clean := true
-	for agent, list := range byAgent {
+	for _, k := range keys {
+		list := byKey[k]
+		who := list[0].Agent
+		if list[0].Instance != "" {
+			who = fleet.ParseInstance(list[0].Instance).Label(true)
+		}
 		if len(list) > 1 {
 			clean = false
-			say(false, fmt.Sprintf("%s: %d harnesses running — every mention will be answered %dx", agent, len(list), len(list)))
+			say(false, fmt.Sprintf("%s: %d harnesses on one identity and one relay — every mention will be answered %dx", who, len(list), len(list)))
 		}
 		var loose []string
 		for _, p := range list {
@@ -337,7 +414,7 @@ func cmdDoctor(h *host.Host) {
 		if len(loose) > 0 {
 			clean = false
 			say(false, fmt.Sprintf("%s: %d harness(es) not under systemd (%s) — a restart will not stop them",
-				agent, len(loose), strings.Join(loose, ", ")))
+				who, len(loose), strings.Join(loose, ", ")))
 		}
 	}
 	if clean {
@@ -388,6 +465,9 @@ func cmdDoctor(h *host.Host) {
 					map[bool]string{true: "", false: " — it will sit idle until it joins one"}[len(chans) > 0]))
 			}
 		}
+		for _, f := range communityFindings(h, c, cfgErr == nil) {
+			say(f.ok, f.msg)
+		}
 	}
 	// Two agents on one key both answer every mention, exactly like two
 	// harnesses on one key.
@@ -409,7 +489,7 @@ func cmdDoctor(h *host.Host) {
 func cmdReap(h *host.Host, args []string) {
 	dry := len(args) > 0 && args[0] == "--dry-run"
 	var loose []host.Proc
-	for _, p := range h.Harnesses() {
+	for _, p := range h.Harnesses(derivePubkey) {
 		if !p.Supervised {
 			loose = append(loose, p)
 		}
@@ -440,13 +520,10 @@ func cmdReap(h *host.Host, args []string) {
 
 func cmdChannels(h *host.Host, args []string) {
 	if len(args) == 0 {
-		die("usage: buzzfleet channels <agent>")
+		die("usage: buzzfleet channels <agent>[@community]")
 	}
-	c, err := h.AgentConfig(args[0])
-	if err != nil {
-		die("%v", err)
-	}
-	chans, err := h.Channels(h.AgentSecret(args[0]), c.Relay)
+	t := mustOne(h, args[0], "channels")
+	chans, err := h.Channels(h.AgentSecret(t.Agent), t.Relay)
 	if err != nil {
 		die("%v", err)
 	}
@@ -457,15 +534,12 @@ func cmdChannels(h *host.Host, args []string) {
 
 func cmdJoin(h *host.Host, args []string) {
 	if len(args) < 2 {
-		die("usage: buzzfleet join <agent> <channel-uuid>")
+		die("usage: buzzfleet join <agent>[@community] <channel-uuid>")
 	}
-	c, err := h.AgentConfig(args[0])
-	if err != nil {
-		die("%v", err)
-	}
-	out, err := h.Buzz(h.AgentSecret(args[0]), c.Relay, "channels", "join", "--channel", args[1])
+	t := mustOne(h, args[0], "join")
+	out, err := h.Buzz(h.AgentSecret(t.Agent), t.Relay, "channels", "join", "--channel", args[1])
 	if err != nil {
 		die("join failed: %v", err)
 	}
-	fmt.Printf("%s joined %s\n%s\n", args[0], args[1], out)
+	fmt.Printf("%s joined %s\n%s\n", t.Label, args[1], out)
 }

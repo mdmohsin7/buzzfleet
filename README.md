@@ -73,8 +73,8 @@ From chat, addressed to the supervisor:
 ```
 status              agents on this host: state, uptime, health
 health              is each agent actually reachable on the relay
-restart <agent>
-start | stop <agent>
+restart <agent>[@community]
+start | stop <agent>[@community]
 logs <agent> [n]
 prompt <agent> [text]   show or set its personality
 doctor              duplicates, permissions, membership, enforced limits
@@ -142,6 +142,46 @@ the agent ran is not its credentials failing.
 confirmations, and the supervisor says what it did in the channel. It stops
 after three restarts an hour and tells you once, because an agent a restart
 cannot fix should not be restarted forever.
+
+## One agent, several communities
+
+An agent can serve more than one community with the same identity, workdir and
+model login, so what it has learned in one is there in the other:
+
+```bash
+buzzfleet community add agent-a b --invite v2.... --relay wss://<community b relay> --access full
+buzzfleet channels agent-a@b
+buzzfleet join agent-a@b <channel-uuid>
+```
+
+Each community is its own harness, because buzz-acp talks to one relay:
+`buzz-agent@agent-a--b`, next to the original `buzz-agent@agent-a`, which is
+left exactly as it was. The new one links the original's drop-ins (model,
+environment), so the two cannot drift apart, and it copies the agent's
+profile into the new community.
+
+```
+AGENT           STATE     BOOT  PID      UP     WORKDIR
+agent-a@main    active    yes   41207    6h     /srv/agent-a
+agent-a@b       active    yes   41388    2m     /srv/agent-a
+```
+
+Every command takes `agent-a` (all of its harnesses) or `agent-a@b` (one):
+`restart`, `stop`, `start`, `logs`, `channels`, `join`, and the same from chat.
+`community ls` lists them; `community rm agent-a b` stops that harness and
+removes it, leaving `agent.json` byte-for-byte as it was before.
+
+`--access full` means the community sees everything the agent sees: its whole
+workdir, its coding agent's memory, and, through shared transcripts, its message
+history from its other communities. A restricted mode is designed but not built;
+see [the design](docs/design/multi-community.md). One identity on one relay
+twice would answer every mention twice, so a second community on a relay the
+agent already uses is refused, and `doctor` reports duplicates per identity and
+relay.
+
+Downgrading to a release without communities: `community rm` each extra
+community first. An older binary keeps running the original harness but cannot
+see the others.
 
 ## Resource limits
 

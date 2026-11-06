@@ -24,7 +24,8 @@ func dockerLoop(ctx context.Context, h *host.Host, cfg *fleet.Config) {
 	var mu sync.Mutex
 	running := map[string]bool{}
 	ensure := func() {
-		for _, n := range h.Agents() {
+		for _, hn := range h.AllHarnesses() {
+			n := hn.Instance()
 			mu.Lock()
 			if running[n] {
 				mu.Unlock()
@@ -32,7 +33,8 @@ func dockerLoop(ctx context.Context, h *host.Host, cfg *fleet.Config) {
 			}
 			running[n] = true
 			mu.Unlock()
-			p := &host.DockerProxy{Agent: n, Socket: host.DockerSocketFor(n), Upstream: host.UpstreamDocker(), Limits: l, Logf: logf}
+			p := &host.DockerProxy{Agent: hn.Agent, Community: hn.Community, Socket: host.DockerSocketFor(n),
+				Upstream: host.UpstreamDocker(), Limits: l, Logf: logf}
 			go func() {
 				if err := p.Serve(ctx); err != nil {
 					logf("docker proxy %s: %v", n, err)
@@ -65,7 +67,8 @@ func dockerFindings(h *host.Host) []finding {
 		return nil
 	}
 	var out []finding
-	for _, n := range h.Agents() {
+	for _, hn := range h.AllHarnesses() {
+		n := hn.Instance()
 		pid := h.MainPID(n)
 		if pid == "" {
 			continue

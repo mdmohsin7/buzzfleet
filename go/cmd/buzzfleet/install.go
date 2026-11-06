@@ -159,12 +159,23 @@ func cmdInstall(h *host.Host, args []string) {
 // is what gives the coding agent its workspace and its per-project memory.
 func cmdRunAgent(h *host.Host, args []string) {
 	if len(args) == 0 {
-		die("usage: buzzfleet run-agent <name>")
+		die("usage: buzzfleet run-agent <instance>")
 	}
-	name := args[0]
+	// The unit instance is "agent" for the community the agent was created
+	// in and "agent--community" for each other one.
+	instance := args[0]
+	hn := fleet.ParseInstance(instance)
+	name := hn.Agent
 	conf, err := h.AgentConfig(name)
 	if err != nil {
 		die("%v", err)
+	}
+	if err := fleet.CheckCommunity(conf.Relay, conf.Communities, hn.Community); err != nil {
+		die("%s: %v", instance, err)
+	}
+	member, ok := conf.In(hn.Community)
+	if !ok {
+		die("%s has no community called %q in agent.json", name, hn.Community)
 	}
 	if _, err := os.Stat(conf.Workdir); err != nil {
 		die("workdir does not exist: %s", conf.Workdir)
@@ -194,7 +205,7 @@ func cmdRunAgent(h *host.Host, args []string) {
 	if agentCmd == "" {
 		agentCmd = "claude-agent-acp"
 	}
-	respondTo := conf.RespondTo
+	respondTo := member.RespondTo
 	if respondTo == "" {
 		respondTo = "owner-only"
 	}
@@ -208,17 +219,21 @@ func cmdRunAgent(h *host.Host, args []string) {
 	env = setEnv(env, "PATH", strings.Join([]string{
 		h.BuzzBin, filepath.Join(home, ".npm-global/bin"), os.Getenv("PATH"),
 	}, ":"))
-	env = setEnv(env, "BUZZ_RELAY_URL", conf.Relay)
+	env = setEnv(env, "BUZZ_RELAY_URL", member.Relay)
+	// Which harness this is, so doctor and reap can tell an agent's harnesses
+	// in different communities apart from a duplicate in the same one.
+	env = setEnv(env, "BUZZ_FLEET_HARNESS", instance)
+	env = setEnv(env, "BUZZ_FLEET_COMMUNITY", hn.Community)
 	env = setEnv(env, "BUZZ_ACP_AGENT_COMMAND", agentCmd)
 	// Containers are made by dockerd, outside this unit's cgroup, so they are
 	// capped on the way in instead: the supervisor serves this socket.
 	if cfg, err := loadConfig(h); err == nil && !cfg.Limits.NoDockerProxy {
-		env = setEnv(env, "DOCKER_HOST", "unix://"+host.DockerSocketFor(name))
+		env = setEnv(env, "DOCKER_HOST", "unix://"+host.DockerSocketFor(instance))
 	}
 
 	argv := []string{"buzz-acp", "--respond-to", respondTo}
-	if conf.Owner != "" {
-		argv = append(argv, "--agent-owner", conf.Owner)
+	if member.Owner != "" {
+		argv = append(argv, "--agent-owner", member.Owner)
 	}
 	if prompt := filepath.Join(dir, "system-prompt.md"); fileExists(prompt) {
 		argv = append(argv, "--system-prompt-file", prompt)

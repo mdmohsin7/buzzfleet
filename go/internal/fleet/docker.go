@@ -23,8 +23,9 @@ import (
 // stop the accident.
 
 const (
-	LabelAgent   = "buzzfleet.agent"
-	LabelCreated = "buzzfleet.created"
+	LabelAgent     = "buzzfleet.agent"
+	LabelCommunity = "buzzfleet.community"
+	LabelCreated   = "buzzfleet.created"
 )
 
 var (
@@ -91,6 +92,12 @@ func canonical(m map[string]any, key string) (any, error) {
 // the top level. Labels are only added on create; they cannot be changed later.
 // Any error means the request must be refused, not passed on.
 func ClampContainer(kind string, body []byte, l Limits, agent string, now int64) ([]byte, []string, error) {
+	return ClampContainerFor(kind, body, l, agent, "", now)
+}
+
+// ClampContainerFor is ClampContainer for a harness in a named community,
+// which is labelled too so cleanup can tell an agent's communities apart.
+func ClampContainerFor(kind string, body []byte, l Limits, agent, community string, now int64) ([]byte, []string, error) {
 	var doc map[string]any
 	if len(bytes.TrimSpace(body)) == 0 {
 		doc = map[string]any{}
@@ -210,6 +217,9 @@ func ClampContainer(kind string, body []byte, l Limits, agent string, now int64)
 		// ones cleanup reads, and the caller's own values for them are replaced.
 		labels[LabelAgent] = agent
 		labels[LabelCreated] = strconv.FormatInt(now, 10)
+		if community != "" {
+			labels[LabelCommunity] = community
+		}
 	}
 
 	out, err := json.Marshal(doc)

@@ -66,11 +66,16 @@ func TestWaitRecords(t *testing.T) {
 	h := &Host{FleetHome: dir}
 	lock := h.TurnLockPath("agent-a")
 	mine, other := h.TurnWaitPath("agent-a"), h.TurnWaitPath("agent-a--b")
-	if err := WriteWait(other, 500); err != nil {
+	w, err := OpenWait(other)
+	if err != nil {
 		t.Fatal(err)
 	}
+	if ReadWait(other) != 0 || len(OtherWaiters(lock, mine)) != 0 {
+		t.Fatal("a gate that is not waiting is not a waiter")
+	}
+	_ = w.Set(500)
 	if ReadWait(other) != 500 {
-		t.Fatal("a live waiter (this process) is read back")
+		t.Fatal("a live waiter is read back")
 	}
 	ws := OtherWaiters(lock, mine)
 	if len(ws) != 1 || ws[0].Since != 500 || !ws[0].Alive {
@@ -79,13 +84,18 @@ func TestWaitRecords(t *testing.T) {
 	if len(OtherWaiters(lock, other)) != 0 {
 		t.Fatal("a harness is not its own competition")
 	}
-	// A record from a gate that died: its pid no longer exists.
-	_ = os.WriteFile(other, []byte("400 2147483646\n"), 0o660)
-	if ReadWait(other) != 0 || OtherWaiters(lock, mine)[0].Alive {
-		t.Fatal("a dead gate's wait record must not count")
+	if _, err := OpenWait(other); err == nil {
+		t.Fatal("two gates for one harness")
 	}
-	_ = WriteWait(other, 0)
-	if _, err := os.Stat(other); !os.IsNotExist(err) {
-		t.Fatal("cleared")
+	// The gate dies: its lock goes with it, and the record it left, still
+	// saying 500, must stop counting.
+	_ = w.Close()
+	if ReadWait(other) != 0 || len(OtherWaiters(lock, mine)) != 0 {
+		t.Fatal("a dead gate's wait record must not count, whatever it says")
+	}
+	if w2, err := OpenWait(other); err != nil {
+		t.Fatal("a new gate takes over the record")
+	} else {
+		w2.Close()
 	}
 }

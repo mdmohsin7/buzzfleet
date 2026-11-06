@@ -72,8 +72,13 @@ func sessionID(params json.RawMessage) string {
 }
 
 var (
-	promptChannelRe = regexp.MustCompile(`\(#([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\)`)
-	promptReplyRe   = regexp.MustCompile("--reply-to ([0-9a-f]{64})")
+	// Only buzz-acp's own fixed lines count: channel names and message
+	// content are written by people, and agents quote buzz CLI syntax all
+	// the time. The channel line is "Channel: <name> (#<uuid>)", so the uuid
+	// is the last "(#…)" on its line; the reply line is one of buzz-acp's
+	// two exact reply instructions.
+	promptChannelRe = regexp.MustCompile(`(?m)^Channel: .*\(#([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\)$`)
+	promptReplyRe   = regexp.MustCompile("IMPORTANT: (?:This is a new top-level message\\. )?For ordinary replies in this turn, use `--reply-to ([0-9a-f]{64})` on `buzz messages send`")
 )
 
 // PromptAnchor finds where a prompt came from, so the queued notice can land
@@ -94,8 +99,10 @@ func PromptAnchor(params json.RawMessage) (channel, replyTo string) {
 				channel = m[1]
 			}
 		}
-		if m := promptReplyRe.FindAllStringSubmatch(block.Text, -1); len(m) > 0 {
-			replyTo = m[len(m)-1][1]
+		if replyTo == "" {
+			if m := promptReplyRe.FindStringSubmatch(block.Text); m != nil {
+				replyTo = m[1]
+			}
 		}
 	}
 	return channel, replyTo
@@ -290,7 +297,6 @@ type Holder struct {
 // Waiter is another harness's record that it is waiting for the turn.
 type Waiter struct {
 	Since int64
-	PID   int
 	Alive bool // its gate is still running; a dead one's record is ignored
 }
 

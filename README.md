@@ -193,8 +193,10 @@ agent-a@main    ok       present on relay; in a turn since 14:02 UTC
 agent-a@b       ok       present on relay; waiting on agent-a@main since 14:05 UTC
 ```
 
-A waiting harness is never restarted for it, since the cause is the other's
-turn. The wait is bounded by the turn limit (2 h by default).
+Waiting is shown, never acted on. The wait is bounded by the turn limit (2 h by
+default). While a prompt waits, other messages for its session still reach the
+coding agent; buzz-acp drives one coding-agent process at a time, so nothing
+depends on that order today.
 
 This is done by a small gate between buzz-acp and the coding agent, installed
 under the coding agent's own name so buzz-acp treats it exactly as before. It

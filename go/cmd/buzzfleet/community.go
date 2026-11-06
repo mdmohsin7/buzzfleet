@@ -323,6 +323,9 @@ func cmdCommunityRm(h *host.Host, args []string) {
 	if err := unlinkDropIns(agent, inst); err != nil {
 		fmt.Fprintf(os.Stderr, "  ! %v\n", err)
 	}
+	// Its gate is gone with it; so is any record of it waiting.
+	_ = os.Remove(h.TurnWaitPath(inst))
+	_ = os.RemoveAll(filepath.Join(h.RunDir(), "shim", inst))
 	next := map[string]fleet.CommunityConfig{}
 	for k, v := range conf.Communities {
 		if k != name {

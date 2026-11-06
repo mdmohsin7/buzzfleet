@@ -163,8 +163,9 @@ type Assessment struct {
 	LimitAssumedLifted bool
 
 	// Waiting: the harness is waiting for its agent's turn, held by another
-	// of the agent's harnesses. It is never healed for that: the cause is the
-	// other harness's turn, and restarting the waiter fixes nothing.
+	// of the agent's harnesses. Waiting itself never looks unhealthy — the
+	// gate keeps the coding agent alive and presence is unaffected — so it is
+	// shown, not acted on, and a real wedge while waiting is still healed.
 	Waiting bool
 }
 
@@ -190,9 +191,6 @@ func Assess(name, unit string, present, childAlive Tri, hasIdentity bool) Assess
 }
 
 func (a Assessment) NeedsHeal() bool {
-	if a.Waiting {
-		return false
-	}
 	return a.State == StateWedged || a.State == StateStalled
 }
 

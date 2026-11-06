@@ -123,47 +123,68 @@ func ReadHolder(path string) *fleet.Holder {
 	return &h
 }
 
-// WriteWait records that a harness has prompts waiting since a time, and the
-// pid of its gate, or clears the record when since is zero.
-func WriteWait(path string, since int64) error {
-	if since == 0 {
-		err := os.Remove(path)
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
+// A harness's wait record is a file its gate holds an exclusive flock on for
+// its whole life, holding the time its oldest prompt started waiting (0 when
+// none is). A reader that can take a shared lock on it knows the gate is
+// dead, and ignores what the file says: liveness comes from the kernel, not
+// from a pid that may have been reused.
+
+// WaitRecord is a gate's own wait record.
+type WaitRecord struct{ f *os.File }
+
+// OpenWait claims a harness's wait record.
+func OpenWait(path string) (*WaitRecord, error) {
 	if err := EnsureRunDir(filepath.Dir(path)); err != nil {
-		return err
+		return nil, err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(fmt.Sprintf("%d %d\n", since, os.Getpid())), 0o660); err != nil {
-		return err
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o660)
+	if err != nil {
+		return nil, err
 	}
-	return os.Rename(tmp, path)
+	_ = f.Chmod(0o660)
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("another gate is already running for this harness (%s)", path)
+	}
+	w := &WaitRecord{f: f}
+	return w, w.Set(0)
 }
 
-// ReadWait returns since when a harness has been waiting, or 0. A wait file
-// left by a gate that died is ignored unless the harness is still running:
-// the caller checks that.
-func ReadWait(path string) int64 {
-	w, ok := readWaiter(path)
-	if !ok || !w.Alive {
-		return 0
+// Set records how long the harness has been waiting; 0 means it is not.
+func (w *WaitRecord) Set(since int64) error {
+	if err := w.f.Truncate(0); err != nil {
+		return err
 	}
-	return w.Since
+	_, err := w.f.WriteAt([]byte(fmt.Sprintf("%d\n", since)), 0)
+	return err
 }
+
+func (w *WaitRecord) Close() error { return w.f.Close() }
 
 func readWaiter(path string) (fleet.Waiter, bool) {
-	b, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return fleet.Waiter{}, false
 	}
+	defer f.Close()
 	var w fleet.Waiter
-	_, _ = fmt.Sscan(strings.TrimSpace(string(b)), &w.Since, &w.PID)
-	// A gate that died leaves its record; only a running one is waiting.
-	w.Alive = w.PID > 0 && syscall.Kill(w.PID, 0) != syscall.ESRCH
+	if syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB) == nil {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		return w, false // its gate is gone
+	}
+	w.Alive = true
+	b := make([]byte, 64)
+	n, _ := f.ReadAt(b, 0)
+	_, _ = fmt.Sscan(strings.TrimSpace(string(b[:n])), &w.Since)
 	return w, w.Since > 0
+}
+
+// ReadWait returns since when a harness has been waiting, or 0.
+func ReadWait(path string) int64 {
+	if w, ok := readWaiter(path); ok {
+		return w.Since
+	}
+	return 0
 }
 
 // OtherWaiters lists the agent's other harnesses that are waiting for its
@@ -172,7 +193,7 @@ func OtherWaiters(lockPath, selfWaitPath string) []fleet.Waiter {
 	matches, _ := filepath.Glob(strings.TrimSuffix(lockPath, ".lock") + ".wait-*")
 	var out []fleet.Waiter
 	for _, m := range matches {
-		if m == selfWaitPath || strings.HasSuffix(m, ".tmp") {
+		if m == selfWaitPath {
 			continue
 		}
 		if w, ok := readWaiter(m); ok {

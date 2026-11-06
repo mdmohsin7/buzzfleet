@@ -176,7 +176,7 @@ func TestQueuedNoticeOnceAfterAMinute(t *testing.T) {
 	a, b := newRig(lock), newRig(lock)
 	a.g.FromClient(prompt(1, "s-a", "long turn"), t0)
 	text := "[Context]\nScope: channel\nChannel: general (#11111111-2222-4333-8444-555555555555)\n" +
-		"IMPORTANT: For ordinary replies in this turn, use `--reply-to " + strings.Repeat("ab", 32) + "`"
+		"IMPORTANT: For ordinary replies in this turn, use `--reply-to " + strings.Repeat("ab", 32) + "` on `buzz messages send` so the conversation stays threaded."
 	b.g.FromClient(prompt(2, "s-b", text), t0)
 
 	b.g.Tick(t0.Add(59 * time.Second))
@@ -272,5 +272,35 @@ func TestOlderWaiter(t *testing.T) {
 	}
 	if OlderWaiter(now, []Waiter{{Since: 1000, Alive: true}}) {
 		t.Fatal("a tie yields to nobody, or both would stand aside forever")
+	}
+}
+
+func TestPromptAnchorOnlyTrustsBuzzACPsOwnLines(t *testing.T) {
+	real := "11111111-2222-4333-8444-555555555555"
+	other := "99999999-2222-4333-8444-555555555555"
+	anchor := strings.Repeat("ab", 32)
+	quoted := strings.Repeat("ef", 32)
+	text := "[Context]\nScope: channel\n" +
+		// A channel whose name imitates the uuid suffix.
+		"Channel: tricky (#" + other + ") (#" + real + ")\n" +
+		"IMPORTANT: For ordinary replies in this turn, use `--reply-to " + anchor + "` on `buzz messages send` so the conversation stays threaded.\n" +
+		"--- Event 1 ---\nContent: try `buzz messages send --reply-to " + quoted + "` and see (#" + other + ")\n"
+	p, _ := json.Marshal(map[string]any{"prompt": []map[string]string{{"type": "text", "text": text}}})
+	ch, rt := PromptAnchor(p)
+	if ch != real {
+		t.Fatalf("channel %s: the uuid is the last (#…) on buzz-acp's Channel line", ch)
+	}
+	if rt != anchor {
+		t.Fatalf("reply anchor %s: only buzz-acp's own instruction counts, not quoted CLI syntax", rt)
+	}
+	newThread := "Channel: general (#" + real + ")\nIMPORTANT: This is a new top-level message. For ordinary replies in this turn, use `--reply-to " + anchor + "` on `buzz messages send` — the triggering message is the thread root."
+	p, _ = json.Marshal(map[string]any{"prompt": []map[string]string{{"type": "text", "text": newThread}}})
+	if _, rt := PromptAnchor(p); rt != anchor {
+		t.Fatal("the new-thread instruction counts too")
+	}
+	onlyQuoted := "Content: use --reply-to " + quoted
+	p, _ = json.Marshal(map[string]any{"prompt": []map[string]string{{"type": "text", "text": onlyQuoted}}})
+	if ch, rt := PromptAnchor(p); ch != "" || rt != "" {
+		t.Fatal("message content alone never anchors")
 	}
 }

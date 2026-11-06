@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -230,6 +231,11 @@ func cmdRunAgent(h *host.Host, args []string) {
 	// workdir with, so it runs exactly as before. BUZZ_FLEET_NO_GATE=1 in a
 	// drop-in turns the gate off.
 	if len(conf.Communities) > 0 && os.Getenv(envNoGate) == "" {
+		// Each coding-agent slot would get a gate of its own, and only one
+		// gate per harness can run; the others would fail to start.
+		if n, _ := strconv.Atoi(os.Getenv("BUZZ_ACP_AGENTS")); n > 1 {
+			die("%s: BUZZ_ACP_AGENTS=%d cannot be combined with the turn gate, which runs one turn at a time for an agent in several communities; set it to 1, or set %s=1 to turn the gate off", instance, n, envNoGate)
+		}
 		gated, genv, err := installGate(h, instance, agentCmd, env)
 		if err != nil {
 			die("%s: turn gate: %v", instance, err)

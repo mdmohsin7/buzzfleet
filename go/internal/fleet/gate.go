@@ -76,7 +76,7 @@ var (
 	// content are written by people, and agents quote buzz CLI syntax all
 	// the time. The channel line is "Channel: <name> (#<uuid>)", so the uuid
 	// is the last "(#…)" on its line; the reply line is one of buzz-acp's
-	// two exact reply instructions.
+	// two exact reply instructions, appended after the content.
 	promptChannelRe = regexp.MustCompile(`(?m)^Channel: .*\(#([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\)$`)
 	promptReplyRe   = regexp.MustCompile("IMPORTANT: (?:This is a new top-level message\\. )?For ordinary replies in this turn, use `--reply-to ([0-9a-f]{64})` on `buzz messages send`")
 )
@@ -99,10 +99,10 @@ func PromptAnchor(params json.RawMessage) (channel, replyTo string) {
 				channel = m[1]
 			}
 		}
-		if replyTo == "" {
-			if m := promptReplyRe.FindStringSubmatch(block.Text); m != nil {
-				replyTo = m[1]
-			}
+		// buzz-acp appends its reply instruction after the event content,
+		// so the last match is its own, even when a message quotes it.
+		if m := promptReplyRe.FindAllStringSubmatch(block.Text, -1); len(m) > 0 {
+			replyTo = m[len(m)-1][1]
 		}
 	}
 	return channel, replyTo

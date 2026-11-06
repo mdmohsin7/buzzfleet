@@ -91,7 +91,8 @@ type finding struct {
 // applying — not what the unit files claim.
 func enforcementLines(h *host.Host, mode fleet.CgroupMode, t fleet.LimitTarget) []finding {
 	var out []finding
-	for _, n := range h.Agents() {
+	for _, hn := range h.AllHarnesses() {
+		n := hn.Instance()
 		pid := h.MainPID(n)
 		if pid == "" {
 			continue

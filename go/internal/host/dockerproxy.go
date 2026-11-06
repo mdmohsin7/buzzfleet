@@ -42,11 +42,12 @@ const maxRewriteBody = 8 << 20
 
 // DockerProxy serves one agent's view of the Docker API.
 type DockerProxy struct {
-	Agent    string
-	Socket   string
-	Upstream string
-	Limits   fleet.Limits
-	Logf     func(format string, a ...any)
+	Agent     string
+	Community string
+	Socket    string
+	Upstream  string
+	Limits    fleet.Limits
+	Logf      func(format string, a ...any)
 }
 
 func (p *DockerProxy) handler() http.Handler {
@@ -85,7 +86,7 @@ func (p *DockerProxy) handler() http.Handler {
 				return
 			}
 			r.Body.Close()
-			out, changes, err := fleet.ClampContainer(kind, body, p.Limits, p.Agent, time.Now().Unix())
+			out, changes, err := fleet.ClampContainerFor(kind, body, p.Limits, p.Agent, p.Community, time.Now().Unix())
 			if err != nil {
 				// Refused rather than passed on: proving that dockerd can never
 				// read a body this code could not is harder than saying no.

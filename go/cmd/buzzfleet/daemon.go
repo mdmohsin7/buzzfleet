@@ -111,6 +111,7 @@ func runDaemon(h *host.Host, cfg *fleet.Config) {
 	go healthLoop(ctx, h, cfg, state, view)
 	go subscribeLoop(ctx, h, cfg, state, seen)
 	go dockerLoop(ctx, h, cfg)
+	go memorySyncLoop(ctx, h, cfg)
 	go heartbeatLoop(ctx, h, cfg, view)
 
 	sig := make(chan os.Signal, 1)

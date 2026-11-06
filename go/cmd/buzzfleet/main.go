@@ -34,6 +34,9 @@ const usage = `buzzfleet — run and supervise Buzz agents on this machine
   community add <agent> <name> --invite <code> --relay <url> --access full
                                 run the agent in another community too
   community rm <agent> <name> | community ls [agent]
+  memory sync <agent> [--to <c>] [--both] [--exclude <glob>]... [--dry-run]
+  memory auto <agent> --every <min> | --off
+                                share the agent's Buzz memory across its communities
   peek <community> <read-only buzz command>
                                 read another of the agent's communities (used by agents)
   heartbeat [--send]            show, or send once, the out-of-band heartbeat
@@ -120,6 +123,8 @@ func main() {
 		cmdCommunity(h, args)
 	case "peek":
 		cmdPeek(h, args)
+	case "memory":
+		cmdMemory(h, args)
 	case "heartbeat":
 		cmdHeartbeat(h, args)
 	case "channels":

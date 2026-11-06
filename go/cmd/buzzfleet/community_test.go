@@ -280,3 +280,23 @@ func TestPeekInsideAHarnessIsThatAgentOnly(t *testing.T) {
 		t.Fatal("its own agent, or an operator outside any harness, is fine")
 	}
 }
+
+func TestMemFlagsRepeat(t *testing.T) {
+	f, pos := memFlags([]string{"agent-a", "--exclude", "mem/p/**", "--exclude", "mem/q", "--both", "--resolve", "mem/a=from", "--dry-run"})
+	if len(pos) != 1 || len(f["exclude"]) != 2 || len(f["both"]) != 1 || f["resolve"][0] != "mem/a=from" || len(f["dry-run"]) != 1 {
+		t.Fatalf("%v %v", f, pos)
+	}
+}
+
+func TestPrivateFilesAreOwnerOnly(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "memory-conflicts", "main--b")
+	p := filepath.Join(dir, "mem__a.json")
+	if err := writePrivate(p, []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	fi, _ := os.Stat(p)
+	di, _ := os.Stat(dir)
+	if fi.Mode().Perm() != 0o600 || di.Mode().Perm() != 0o700 {
+		t.Fatalf("file %o dir %o: they hold decrypted memory", fi.Mode().Perm(), di.Mode().Perm())
+	}
+}

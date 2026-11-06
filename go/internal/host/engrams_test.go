@@ -6,6 +6,7 @@ import (
 
 	"github.com/mdmohsin7/buzzfleet/internal/fleet"
 	"github.com/nbd-wtf/go-nostr"
+	"github.com/nbd-wtf/go-nostr/nip11"
 	"github.com/nbd-wtf/go-nostr/nip44"
 )
 
@@ -140,5 +141,14 @@ func TestPaginateReadsPastTheRelaysPageCap(t *testing.T) {
 	all = same
 	if _, err := paginate(relay(5), nostr.Filter{}, 5); err == nil {
 		t.Fatal("an unfinishable listing must fail, not come back short")
+	}
+}
+
+func TestPageNeverExceedsTheRelaysCap(t *testing.T) {
+	if capPage(&nip11.RelayLimitationDocument{MaxLimit: 100}, nil) != 100 {
+		t.Fatal("a relay capped below our page: ask for its cap, so a short page still means done")
+	}
+	if capPage(&nip11.RelayLimitationDocument{MaxLimit: 1000}, nil) != engramPage || capPage(nil, nil) != engramPage || capPage(nil, fmt.Errorf("x")) != engramPage {
+		t.Fatal("otherwise our own page")
 	}
 }

@@ -9,6 +9,7 @@ import (
 
 	"github.com/mdmohsin7/buzzfleet/internal/fleet"
 	"github.com/nbd-wtf/go-nostr"
+	"github.com/nbd-wtf/go-nostr/nip11"
 	"github.com/nbd-wtf/go-nostr/nip44"
 )
 
@@ -63,7 +64,7 @@ func FetchHeads(ctx context.Context, relay, secret, owner string) ([]fleet.Head,
 	evs, err := paginate(func(f nostr.Filter) ([]*nostr.Event, error) { return r.QuerySync(ctx, f) }, nostr.Filter{
 		Kinds: []int{fleet.EngramKind}, Authors: []string{agent},
 		Tags: nostr.TagMap{"p": []string{owner}},
-	}, engramPage)
+	}, pageSize(ctx, relay))
 	if err != nil {
 		return nil, 0, err
 	}
@@ -74,6 +75,21 @@ func FetchHeads(ctx context.Context, relay, secret, owner string) ([]fleet.Head,
 		}
 	}
 	return out, len(evs), nil
+}
+
+// pageSize is the page asked for: at most engramPage, and never more than the
+// relay says it will return (NIP-11 limitation.max_limit). A short page only
+// means "no more" when the page asked for is one the relay will fill.
+func pageSize(ctx context.Context, relay string) int {
+	info, err := nip11.Fetch(ctx, HTTPRelay(relay))
+	return capPage(info.Limitation, err)
+}
+
+func capPage(l *nip11.RelayLimitationDocument, err error) int {
+	if err == nil && l != nil && l.MaxLimit > 0 && l.MaxLimit < engramPage {
+		return l.MaxLimit
+	}
+	return engramPage
 }
 
 // A Buzz relay caps every query at a page (1000 events), whatever limit is

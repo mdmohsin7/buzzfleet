@@ -274,6 +274,11 @@ func cmdCommunityAdd(h *host.Host, args []string) {
 	fmt.Printf("\n%s@%s is up. It has joined no channels there yet:\n", agent, name)
 	fmt.Printf("  buzzfleet channels %s@%s     (then: buzzfleet join %s@%s <channel-uuid>)\n", agent, name, agent, name)
 	fmt.Println("  (its Docker proxy socket appears within a minute, once the supervisor next looks)")
+	if len(conf.Communities) == 0 {
+		fmt.Printf("\nOne more step: %s's original harness is not behind the turn gate yet, so for now\n"+
+			"its turns can overlap %s@%s's. Restart it when it is idle:\n  buzzfleet restart %s@main\n",
+			agent, agent, name, agent)
+	}
 }
 
 type profile struct{ name, about, avatar string }
@@ -318,6 +323,9 @@ func cmdCommunityRm(h *host.Host, args []string) {
 	if err := unlinkDropIns(agent, inst); err != nil {
 		fmt.Fprintf(os.Stderr, "  ! %v\n", err)
 	}
+	// Its gate is gone with it; so is any record of it waiting.
+	_ = os.Remove(h.TurnWaitPath(inst))
+	_ = os.RemoveAll(filepath.Join(h.RunDir(), "shim", inst))
 	next := map[string]fleet.CommunityConfig{}
 	for k, v := range conf.Communities {
 		if k != name {
@@ -356,6 +364,22 @@ func communityFindings(h *host.Host, c *host.AgentConfig, reachable bool) []find
 	}
 	if err := fleet.CheckCommunities(c.Relay, c.Communities); err != nil {
 		out = append(out, finding{msg: fmt.Sprintf("%s: %v", c.Name, err)})
+	}
+	// With more than one harness on one workdir, every one of them must go
+	// through the turn gate, or two turns can run at once.
+	for _, hn := range c.Harnesses() {
+		pid := h.MainPID(hn.Instance())
+		if pid == "" {
+			continue
+		}
+		env, _ := os.ReadFile("/proc/" + pid + "/environ")
+		vars := "\x00" + string(env)
+		switch {
+		case strings.Contains(vars, "\x00"+envNoGate+"="):
+			out = append(out, finding{warn: true, msg: fmt.Sprintf("%s: turn gate turned off (%s); its turns can overlap the agent's other communities", hn.Label(true), envNoGate)})
+		case !strings.Contains(vars, "\x00"+envGateReal+"="):
+			out = append(out, finding{msg: fmt.Sprintf("%s: started without the turn gate, so its turns can overlap the agent's other communities — restart it", hn.Label(true))})
+		}
 	}
 	for _, hn := range c.Harnesses()[1:] {
 		inst, label := hn.Instance(), hn.Label(true)

@@ -161,6 +161,12 @@ type Assessment struct {
 	// LimitAssumedLifted: ok only because a usage limit's reset time has
 	// passed, with no turn since to prove it.
 	LimitAssumedLifted bool
+
+	// Waiting: the harness is waiting for its agent's turn, held by another
+	// of the agent's harnesses. Waiting itself never looks unhealthy — the
+	// gate keeps the coding agent alive and presence is unaffected — so it is
+	// shown, not acted on, and a real wedge while waiting is still healed.
+	Waiting bool
 }
 
 // Assess turns raw observations into one of the states above.

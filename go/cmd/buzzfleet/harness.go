@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/mdmohsin7/buzzfleet/internal/fleet"
 	"github.com/mdmohsin7/buzzfleet/internal/host"
@@ -128,4 +129,16 @@ func groupHarnesses(procs []host.Proc) ([]string, map[string][]host.Proc) {
 		add(home, p)
 	}
 	return keys, byKey
+}
+
+// withGate adds the harness's place in its agent's turn queue: waiting on
+// another harness, or in a turn itself.
+func withGate(h *host.Host, t target, a fleet.Assessment) fleet.Assessment {
+	holder := host.ReadHolder(h.TurnLockPath(t.Agent))
+	waiting := host.ReadWait(h.TurnWaitPath(t.Instance()))
+	if note := fleet.GateNote(t.Instance(), holder, waiting, time.Now()); note != "" {
+		a.Detail += "; " + note
+	}
+	a.Waiting = waiting > 0 && holder != nil && holder.Harness != t.Instance()
+	return a
 }

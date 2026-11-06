@@ -86,6 +86,12 @@ func derivePubkey(secret string) (string, error) {
 }
 
 func main() {
+	// Started through run-agent's link under the agent command's own name:
+	// this process is the turn gate in front of that command.
+	if invokedAsGate() {
+		runGate()
+		return
+	}
 	if len(os.Args) < 2 {
 		fmt.Print(usage)
 		return
@@ -294,6 +300,9 @@ func assessAll(h *host.Host, cfg *fleet.Config) []fleet.Assessment {
 			}
 		}
 		a := assessTarget(t, unit, present, child, hasID)
+		if unit == "active" {
+			a = withGate(h, t, a)
+		}
 		// Only worth reading transcripts for an agent that otherwise looks
 		// fine: that is the one whose failing turns nothing else would catch.
 		if a.State == fleet.StateOK {
@@ -466,6 +475,10 @@ func cmdDoctor(h *host.Host) {
 			}
 		}
 		for _, f := range communityFindings(h, c, cfgErr == nil) {
+			if f.warn {
+				fmt.Printf("WARN %s\n", f.msg)
+				continue
+			}
 			say(f.ok, f.msg)
 		}
 	}

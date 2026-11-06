@@ -34,6 +34,9 @@ const usage = `buzzfleet — run and supervise Buzz agents on this machine
   community add <agent> <name> --invite <code> --relay <url> --access full
                                 run the agent in another community too
   community rm <agent> <name> | community ls [agent]
+  memory sync <agent> [--to <c>] [--both] [--exclude <glob>]... [--dry-run]
+  memory auto <agent> --every <min> | --off
+                                share the agent's Buzz memory across its communities
   peek <community> <read-only buzz command>
                                 read another of the agent's communities (used by agents)
   heartbeat [--send]            show, or send once, the out-of-band heartbeat
@@ -120,6 +123,8 @@ func main() {
 		cmdCommunity(h, args)
 	case "peek":
 		cmdPeek(h, args)
+	case "memory":
+		cmdMemory(h, args)
 	case "heartbeat":
 		cmdHeartbeat(h, args)
 	case "channels":
@@ -193,7 +198,13 @@ func cmdStatus(h *host.Host, args []string) {
 		fmt.Println("no agents configured")
 		return
 	}
-	fmt.Printf("%-16s%-10s%-6s%-9s%-7s%s\n", "AGENT", "STATE", "BOOT", "PID", "UP", "WORKDIR")
+	w := 16
+	for _, t := range ts {
+		if len(t.Label)+2 > w {
+			w = len(t.Label) + 2
+		}
+	}
+	fmt.Printf("%-*s%-10s%-6s%-9s%-7s%s\n", w, "AGENT", "STATE", "BOOT", "PID", "UP", "WORKDIR")
 	for _, t := range ts {
 		inst := t.Instance()
 		state := h.UnitState(inst)
@@ -213,7 +224,7 @@ func cmdStatus(h *host.Host, args []string) {
 		if t.Config != nil {
 			wd = t.Config.Workdir
 		}
-		fmt.Printf("%-16s%-10s%-6s%-9s%-7s%s\n", t.Label, state, boot, pid, up, wd)
+		fmt.Printf("%-*s%-10s%-6s%-9s%-7s%s\n", w, t.Label, state, boot, pid, up, wd)
 	}
 }
 
@@ -328,9 +339,15 @@ func healthText(h *host.Host, cfg *fleet.Config) string {
 	if len(rows) == 0 {
 		return "no agents configured"
 	}
+	w := 16
+	for _, r := range rows {
+		if len(r.Name)+2 > w {
+			w = len(r.Name) + 2
+		}
+	}
 	var b strings.Builder
 	for _, r := range rows {
-		fmt.Fprintf(&b, "%-16s%-9s%s\n", r.Name, r.State, r.Detail)
+		fmt.Fprintf(&b, "%-*s%-9s%s\n", w, r.Name, r.State, r.Detail)
 	}
 	return strings.TrimRight(b.String(), "\n")
 }

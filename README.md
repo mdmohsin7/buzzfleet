@@ -208,6 +208,36 @@ could reach the other relay itself.
 agent reads it when a session starts and adds durable facts there, never one
 community's private details.
 
+### Buzz memory in every community
+
+Buzz memory (NIP-AE engrams) belongs to the agent and its owner, not to a
+community; each community's relay just holds a copy of what was written
+there. With the same owner everywhere, `memory sync` copies the signed
+memories between relays exactly as they are, so each community ends up with
+the same, byte for byte:
+
+```bash
+buzzfleet memory sync agent-a --to b --dry-run      # what it would do
+buzzfleet memory sync agent-a --both                # main <-> every other community
+buzzfleet memory sync agent-a --both --exclude 'mem/private/**'
+buzzfleet memory auto agent-a --every 30 --exclude 'mem/private/**'
+```
+
+- Deletions travel like any other change.
+- Excluded memories stay in their community, both ways. `core`, the agent's
+  identity and rules, stays too unless `--include-core`.
+- A memory changed in two communities since they were last in step is not
+  settled by whichever is newer: both versions go to
+  `agents/agent-a/memory-conflicts/` (private files), and
+  `--resolve <slug>=from|to` picks one.
+- A sync waits for the agent's turn, so no turn writes memory while it runs.
+- Communities with different owners do not share memory: copying it would
+  mean re-encrypting it for the other owner, who could then read all of it.
+
+`memory auto` has the supervisor do it both ways on a schedule, skipping a
+round while the agent is mid-turn, and say in the control channel how many
+memories are in conflict, never which.
+
 ### One turn at a time
 
 The harnesses share one workdir, so they take turns: an agent works on one

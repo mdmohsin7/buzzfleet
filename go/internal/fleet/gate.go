@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -313,7 +314,12 @@ func OlderWaiter(since time.Time, others []Waiter) bool {
 
 // GateNote describes a harness's place in its agent's turn queue, for status.
 func GateNote(self string, holder *Holder, waitingSince int64, now time.Time) string {
-	label := func(inst string) string { return ParseInstance(inst).Label(true) }
+	label := func(inst string) string {
+		if a, ok := strings.CutSuffix(inst, "--memory-sync"); ok {
+			return a + "'s memory sync"
+		}
+		return ParseInstance(inst).Label(true)
+	}
 	clock := func(t int64) string { return time.Unix(t, 0).UTC().Format("15:04 UTC") }
 	switch {
 	case waitingSince > 0 && holder != nil:

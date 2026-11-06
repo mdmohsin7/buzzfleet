@@ -8,9 +8,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/mdmohsin7/buzzfleet/internal/fleet"
@@ -143,11 +145,20 @@ func runGate() {
 		os.Exit(1)
 	}
 	waitPath := os.Getenv(envGateWait)
-	_ = host.WriteWait(waitPath, 0) // whatever a previous gate left is stale
+	wait, err := host.OpenWait(waitPath)
+	if err != nil {
+		gateLog("%v", err)
+		os.Exit(1)
+	}
 
 	child := exec.Command(os.Getenv(envGateReal), os.Args[1:]...)
 	child.Env = childEnv()
 	child.Stderr = os.Stderr
+	// If buzz-acp kills the gate outright, the agent goes with it instead of
+	// lingering until it next reads stdin. Pdeathsig follows the thread that
+	// started the child, so that thread stays put.
+	runtime.LockOSThread()
+	child.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
 	toChild, err := child.StdinPipe()
 	if err != nil {
 		gateLog("%v", err)
@@ -163,16 +174,17 @@ func runGate() {
 		os.Exit(1)
 	}
 
-	var outMu sync.Mutex
-	write := func(w io.Writer, line []byte) {
-		outMu.Lock()
-		defer outMu.Unlock()
-		_, _ = w.Write(append(line, '\n'))
-	}
+	// The loop below only ever enqueues. Each pipe has one writer goroutine
+	// of its own, so a write that blocks — a multi-megabyte prompt into an
+	// agent busy streaming its output — never stops the loop from draining
+	// the other direction. With blocking writes in the loop, the two sides
+	// would each wait for the other to read, for good.
+	toAgentQ := newLineWriter(toChild, func() { _ = toChild.Close() })
+	toClientQ := newLineWriter(os.Stdout, nil)
 	g := &fleet.Gate{
 		Lock:     lock,
-		ToAgent:  func(b []byte) { write(toChild, b) },
-		ToClient: func(b []byte) { write(os.Stdout, b) },
+		ToAgent:  toAgentQ.Send,
+		ToClient: toClientQ.Send,
 		MaxWait:  maxTurnWait(),
 		Queued:   func(p fleet.Pending) { go postQueued(p) },
 		Yield: func(since time.Time) bool {
@@ -186,7 +198,7 @@ func runGate() {
 			if !holding && len(waiting) > 0 {
 				since = waiting[0].Since.Unix()
 			}
-			_ = host.WriteWait(waitPath, since)
+			_ = wait.Set(since)
 		},
 	}
 
@@ -199,7 +211,7 @@ func runGate() {
 		case line, ok := <-clientLines:
 			if !ok {
 				clientLines = nil
-				_ = toChild.Close() // buzz-acp went away: let the agent see EOF
+				toAgentQ.Close() // buzz-acp went away: the agent sees EOF once the queue drains
 				continue
 			}
 			g.FromClient(line, time.Now())
@@ -214,7 +226,9 @@ func runGate() {
 			g.Tick(now)
 		}
 	}
-	_ = host.WriteWait(waitPath, 0)
+	_ = wait.Set(0)
+	toClientQ.Close()
+	toClientQ.Wait() // everything the agent said reaches buzz-acp first
 	err = child.Wait()
 	_ = lock.Close()
 	var ee *exec.ExitError
@@ -265,3 +279,65 @@ func postQueued(p fleet.Pending) {
 	}
 	gateLog("prompt %s queued for over a minute; said so in the channel", p.ID)
 }
+
+// lineWriter writes lines to one pipe from one goroutine, in order, with an
+// unbounded queue in front: Send never blocks.
+type lineWriter struct {
+	mu      sync.Mutex
+	cond    *sync.Cond
+	queue   [][]byte
+	closed  bool
+	done    chan struct{}
+	onClose func()
+}
+
+func newLineWriter(w io.Writer, onClose func()) *lineWriter {
+	lw := &lineWriter{done: make(chan struct{}), onClose: onClose}
+	lw.cond = sync.NewCond(&lw.mu)
+	go func() {
+		defer close(lw.done)
+		for {
+			lw.mu.Lock()
+			for len(lw.queue) == 0 && !lw.closed {
+				lw.cond.Wait()
+			}
+			if len(lw.queue) == 0 && lw.closed {
+				lw.mu.Unlock()
+				if lw.onClose != nil {
+					lw.onClose()
+				}
+				return
+			}
+			line := lw.queue[0]
+			lw.queue[0] = nil
+			lw.queue = lw.queue[1:]
+			lw.mu.Unlock()
+			if _, err := w.Write(append(line, '\n')); err != nil {
+				// The reader is gone; drop the rest rather than block.
+				lw.mu.Lock()
+				lw.queue, lw.closed = nil, true
+				lw.mu.Unlock()
+			}
+		}
+	}()
+	return lw
+}
+
+func (lw *lineWriter) Send(line []byte) {
+	lw.mu.Lock()
+	if !lw.closed {
+		lw.queue = append(lw.queue, line)
+	}
+	lw.mu.Unlock()
+	lw.cond.Signal()
+}
+
+// Close lets the queue drain, then runs onClose.
+func (lw *lineWriter) Close() {
+	lw.mu.Lock()
+	lw.closed = true
+	lw.mu.Unlock()
+	lw.cond.Signal()
+}
+
+func (lw *lineWriter) Wait() { <-lw.done }

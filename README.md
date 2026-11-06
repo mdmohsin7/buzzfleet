@@ -179,6 +179,29 @@ twice would answer every mention twice, so a second community on a relay the
 agent already uses is refused, and `doctor` reports duplicates per identity and
 relay.
 
+### One turn at a time
+
+The harnesses share one workdir, so they take turns: an agent works on one
+community's request at a time, as it always has in one community. A request
+that arrives while it is busy elsewhere waits, and after a minute the agent
+says so where it was asked ("Busy with another task right now. This is
+queued…"), without saying where. Turns are first come, first served; a busy
+community cannot keep the agent from another. `health` shows it:
+
+```
+agent-a@main    ok       present on relay; in a turn since 14:02 UTC
+agent-a@b       ok       present on relay; waiting on agent-a@main since 14:05 UTC
+```
+
+A waiting harness is never restarted for it, since the cause is the other's
+turn. The wait is bounded by the turn limit (2 h by default).
+
+This is done by a small gate between buzz-acp and the coding agent, installed
+under the coding agent's own name so buzz-acp treats it exactly as before. It
+passes everything through except that a prompt waits for the agent's turn
+lock. `BUZZ_FLEET_NO_GATE=1` in a drop-in turns it off; `doctor` warns when an
+agent in several communities has a harness without it.
+
 Downgrading to a release without communities: `community rm` each extra
 community first. An older binary keeps running the original harness but cannot
 see the others.

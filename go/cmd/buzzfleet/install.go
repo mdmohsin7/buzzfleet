@@ -225,6 +225,17 @@ func cmdRunAgent(h *host.Host, args []string) {
 	env = setEnv(env, "BUZZ_FLEET_HARNESS", instance)
 	env = setEnv(env, "BUZZ_FLEET_COMMUNITY", hn.Community)
 	env = setEnv(env, "BUZZ_ACP_AGENT_COMMAND", agentCmd)
+	// The turn gate: one turn at a time for the agent, across every
+	// community it is in. An agent in one community has nothing to share its
+	// workdir with, so it runs exactly as before. BUZZ_FLEET_NO_GATE=1 in a
+	// drop-in turns the gate off.
+	if len(conf.Communities) > 0 && os.Getenv(envNoGate) == "" {
+		gated, genv, err := installGate(h, instance, agentCmd, env)
+		if err != nil {
+			die("%s: turn gate: %v", instance, err)
+		}
+		env = setEnv(genv, "BUZZ_ACP_AGENT_COMMAND", gated)
+	}
 	// Containers are made by dockerd, outside this unit's cgroup, so they are
 	// capped on the way in instead: the supervisor serves this socket.
 	if cfg, err := loadConfig(h); err == nil && !cfg.Limits.NoDockerProxy {

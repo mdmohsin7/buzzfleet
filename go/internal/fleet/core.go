@@ -161,6 +161,11 @@ type Assessment struct {
 	// LimitAssumedLifted: ok only because a usage limit's reset time has
 	// passed, with no turn since to prove it.
 	LimitAssumedLifted bool
+
+	// Waiting: the harness is waiting for its agent's turn, held by another
+	// of the agent's harnesses. It is never healed for that: the cause is the
+	// other harness's turn, and restarting the waiter fixes nothing.
+	Waiting bool
 }
 
 // Assess turns raw observations into one of the states above.
@@ -185,6 +190,9 @@ func Assess(name, unit string, present, childAlive Tri, hasIdentity bool) Assess
 }
 
 func (a Assessment) NeedsHeal() bool {
+	if a.Waiting {
+		return false
+	}
 	return a.State == StateWedged || a.State == StateStalled
 }
 

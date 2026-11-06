@@ -8,11 +8,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/mdmohsin7/buzzfleet/internal/fleet"
@@ -155,10 +153,8 @@ func runGate() {
 	child.Env = childEnv()
 	child.Stderr = os.Stderr
 	// If buzz-acp kills the gate outright, the agent goes with it instead of
-	// lingering until it next reads stdin. Pdeathsig follows the thread that
-	// started the child, so that thread stays put.
-	runtime.LockOSThread()
-	child.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+	// lingering until it next reads stdin (where the platform can do that).
+	dieWithParent(child)
 	toChild, err := child.StdinPipe()
 	if err != nil {
 		gateLog("%v", err)

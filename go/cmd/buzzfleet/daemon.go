@@ -303,6 +303,22 @@ func handleCommand(h *host.Host, cfg *fleet.Config, text string) string {
 		if arg == "" {
 			return "usage: `prompt <agent>` to show, or `prompt <agent> <text...>` to set"
 		}
+		if ag, comm, all := fleet.ParseTarget(arg); !all {
+			// One community's addendum to the agent's personality.
+			ts, err := resolve(h, arg)
+			if err != nil {
+				return fmt.Sprintf("`%v`", err)
+			}
+			if len(args) == 1 {
+				return hostPrefix + block(describeCommunityPrompt(h, ag, comm))
+			}
+			body := strings.TrimSpace(text[strings.Index(text, arg)+len(arg):])
+			if err := os.WriteFile(addendumPath(h, ag, comm), []byte(body+"\n"), 0o644); err != nil {
+				return fmt.Sprintf("could not set the addendum: `%v`", err)
+			}
+			out := capture(func() { lifecycleOne(h, "restart", ts[0]) })
+			return fmt.Sprintf("**%s** — %s's addendum updated and applied.\n%s", cfg.Host, ts[0].Label, block(out))
+		}
 		if len(args) == 1 {
 			p := readPrompt(h, arg)
 			if p == "" {

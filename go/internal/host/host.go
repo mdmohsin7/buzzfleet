@@ -328,7 +328,7 @@ type Proc struct {
 }
 
 var harnessRe = regexp.MustCompile(`^(\d+)\s+(.*buzz-acp\b.*)$`)
-var promptRe = regexp.MustCompile(`agents/([^/]+)/system-prompt\.md`)
+var promptRe = regexp.MustCompile(`agents/([^/]+)/system-prompt\.md|run/prompt-([^/]+?)(?:--[^/]+)?\.md`)
 
 // procEnv reads the variables that identify a harness from its environment.
 func procEnv(pid string) map[string]string {
@@ -381,6 +381,9 @@ func (h *Host) Harnesses(derive func(string) (string, error)) []Proc {
 		p := Proc{PID: m[1], Agent: "unknown", Supervised: supervised[m[1]]}
 		if pm := promptRe.FindStringSubmatch(m[2]); pm != nil {
 			p.Agent = pm[1]
+			if p.Agent == "" {
+				p.Agent = pm[2]
+			}
 		}
 		env := procEnv(m[1])
 		if inst := env["BUZZ_FLEET_HARNESS"]; inst != "" {

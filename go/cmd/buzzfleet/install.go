@@ -252,7 +252,19 @@ func cmdRunAgent(h *host.Host, args []string) {
 	if member.Owner != "" {
 		argv = append(argv, "--agent-owner", member.Owner)
 	}
-	if prompt := filepath.Join(dir, "system-prompt.md"); fileExists(prompt) {
+	if len(conf.Communities) > 0 {
+		// Several communities: the personality, this community's addendum,
+		// and what the agent needs to know about being in more than one.
+		p, extra, err := harnessPrompt(h, conf, hn)
+		if err != nil {
+			die("%s: prompt: %v", instance, err)
+		}
+		for _, kv := range extra {
+			k, v, _ := strings.Cut(kv, "=")
+			env = setEnv(env, k, v)
+		}
+		argv = append(argv, "--system-prompt-file", p)
+	} else if prompt := filepath.Join(dir, "system-prompt.md"); fileExists(prompt) {
 		argv = append(argv, "--system-prompt-file", prompt)
 	}
 

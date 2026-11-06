@@ -161,11 +161,15 @@ type Gate struct {
 	// work therefore keeps the agent's turn after its prompt ends, until
 	// that self-started work has gone quiet (or the cap passes); and work
 	// the agent starts on its own while nobody holds the turn takes it.
-	bgSeen     bool      // the current turn started background work
-	afterglow  bool      // holding past the prompt, for background work
-	since      time.Time // when the afterglow began
-	woke       bool      // the agent has worked on its own since
-	autonomous bool      // holding for work the agent started on its own
+	//
+	// Neither hold may keep the turn from the other communities for good:
+	// while one is on, this harness's own new prompts queue and yield like
+	// anyone else's, and both are capped from the moment the hold began.
+	bgCalls    map[string]bool // tool calls of this hold that started background work
+	afterglow  bool            // holding past the prompts, for background work
+	woke       bool            // the agent has worked on its own since
+	autonomous bool            // holding for work the agent started on its own
+	holdStart  time.Time       // when the afterglow or autonomous hold began; never reset
 	lastActive time.Time
 	overlapped bool // warned already about this burst of overlapping work
 }
@@ -199,12 +203,15 @@ func (g *Gate) FromClient(line []byte, now time.Time) {
 	}
 	switch {
 	case m.Method == "session/prompt" && m.ID != nil:
-		if g.holding {
-			// Already this harness's turn: a second prompt from the same
-			// harness (its own queue or steering) goes straight through.
+		if g.holding && len(g.inflight) > 0 {
+			// Mid-prompt: a second prompt from the same harness (its own
+			// queue or steering) goes straight through.
 			g.forward(m.ID, line)
 			return
 		}
+		// Otherwise it queues, even while this harness holds the turn for
+		// background work: a hold for work outside a prompt must not let
+		// its own community jump ahead of another that has been waiting.
 		ch, rt := PromptAnchor(m.Params)
 		g.logf("prompt %s arrived; waiting for the agent's turn", m.ID)
 		g.queue = append(g.queue, &Pending{ID: m.ID, Session: sessionID(m.Params), Line: line, Since: now, Channel: ch, ReplyTo: rt})
@@ -257,20 +264,25 @@ func (g *Gate) FromAgent(line []byte, now time.Time) {
 	if len(g.inflight) > 0 || !g.holding {
 		return
 	}
-	if g.bgSeen {
+	switch {
+	case g.afterglow || g.autonomous:
+		// A prompt inside an existing hold: the hold goes on as it was,
+		// with its cap still counting from when it began.
+	case len(g.bgCalls) > 0:
 		// The prompt is over but its background work is not: keep the
 		// turn until the agent, woken by that work, has finished.
-		g.afterglow, g.since, g.woke, g.lastActive = true, now, false, now
+		g.afterglow, g.holdStart, g.woke, g.lastActive = true, now, false, now
 		g.logf("prompt %s done, but it left background work running; holding the turn until that is finished", m.ID)
 		g.changed()
-		return
+	default:
+		g.release("prompt " + string(m.ID) + " done; turn released")
 	}
-	g.release("prompt " + string(m.ID) + " done; turn released")
 }
 
 func (g *Gate) release(why string) {
 	_ = g.Lock.Unlock()
-	g.holding, g.bgSeen, g.afterglow, g.autonomous, g.woke = false, false, false, false, false
+	g.holding, g.afterglow, g.autonomous, g.woke = false, false, false, false
+	g.bgCalls = nil
 	g.logf("%s", why)
 	g.changed()
 }
@@ -281,6 +293,7 @@ func (g *Gate) agentActive(params json.RawMessage, now time.Time) {
 	var p struct {
 		Update struct {
 			Kind     string `json:"sessionUpdate"`
+			CallID   string `json:"toolCallId"`
 			RawInput struct {
 				Background bool `json:"run_in_background"`
 			} `json:"rawInput"`
@@ -289,7 +302,16 @@ func (g *Gate) agentActive(params json.RawMessage, now time.Time) {
 	_ = json.Unmarshal(params, &p)
 	k := p.Update.Kind
 	if (k == "tool_call" || k == "tool_call_update") && p.Update.RawInput.Background && g.holding {
-		g.bgSeen = true
+		if g.bgCalls == nil {
+			g.bgCalls = map[string]bool{}
+		}
+		g.bgCalls[p.Update.CallID] = true
+	}
+	// Updates about a call that went to the background are its launch, not
+	// the agent waking: Claude Code marks such a call completed the moment
+	// it is backgrounded, long before the command itself ends.
+	if g.bgCalls[p.Update.CallID] && p.Update.CallID != "" {
+		return
 	}
 	// Only real work counts as activity: the agent announcing its commands,
 	// mode or usage is not doing anything.
@@ -308,9 +330,13 @@ func (g *Gate) agentActive(params json.RawMessage, now time.Time) {
 	case g.holding:
 	default:
 		// Working on its own with nobody holding its turn: take it, so no
-		// other community starts a turn on top of this one.
-		if got, err := g.Lock.TryLock(); err == nil && got {
-			g.holding, g.autonomous, g.overlapped = true, true, false
+		// other community starts a turn on top of this one — unless another
+		// community is already waiting for the turn, which comes first.
+		waiting := g.Yield != nil && g.Yield(now)
+		if waiting {
+			// fall through to the overlap warning
+		} else if got, err := g.Lock.TryLock(); err == nil && got {
+			g.holding, g.autonomous, g.overlapped, g.holdStart = true, true, false, now
 			g.logf("the agent started working on its own; holding its turn while it does")
 			g.changed()
 			return
@@ -325,17 +351,35 @@ func (g *Gate) agentActive(params json.RawMessage, now time.Time) {
 // Tick tries the lock for waiting prompts, announces long waits, and fails
 // prompts that have waited beyond the limit.
 func (g *Gate) Tick(now time.Time) {
+	idle := len(g.inflight) == 0
 	switch {
-	case g.afterglow && g.woke && now.Sub(g.lastActive) >= QuietAfter:
+	case (g.afterglow || g.autonomous) && now.Sub(g.holdStart) >= BackgroundCap:
+		// Checked first and regardless of prompts: the cap is what makes
+		// sure no hold keeps the other communities off for good.
+		g.inflight = nil
+		g.release(fmt.Sprintf("work outside a prompt still going after %s; turn released anyway, so other communities are not held off", BackgroundCap))
+	case g.afterglow && idle && g.woke && now.Sub(g.lastActive) >= QuietAfter:
 		g.release("the background work and what the agent did after it are finished; turn released")
-	case g.afterglow && now.Sub(g.since) >= BackgroundCap:
-		g.release(fmt.Sprintf("background work still running after %s; turn released anyway, so other communities are not held off", BackgroundCap))
-	case g.autonomous && now.Sub(g.lastActive) >= QuietAfter:
+	case g.autonomous && idle && now.Sub(g.lastActive) >= QuietAfter:
 		g.release("the agent's own work is finished; turn released")
 	case !g.holding && g.overlapped && now.Sub(g.lastActive) >= QuietAfter:
 		g.overlapped = false
 	}
 	if len(g.queue) == 0 {
+		return
+	}
+	// This harness already holds the turn for work outside a prompt: its own
+	// new prompts may go on in that hold, but only if nobody else has been
+	// waiting longer; otherwise they wait for the hold to end, and the older
+	// waiter goes first.
+	if g.holding && idle && (g.afterglow || g.autonomous) && (g.Yield == nil || !g.Yield(g.queue[0].Since)) {
+		q := g.queue
+		g.queue = nil
+		for _, p := range q {
+			g.logf("prompt %s started inside the agent's own work, after waiting %s", p.ID, now.Sub(p.Since).Round(time.Second))
+			g.forward(p.ID, p.Line)
+		}
+		g.changed()
 		return
 	}
 	if !g.holding && (g.Yield == nil || !g.Yield(g.queue[0].Since)) {

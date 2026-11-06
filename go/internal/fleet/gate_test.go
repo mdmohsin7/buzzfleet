@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -86,7 +87,7 @@ func TestTwoHarnessesNeverRunTurnsAtOnce(t *testing.T) {
 		t.Fatal("still waiting")
 	}
 
-	a.g.FromAgent(done(1))
+	a.g.FromAgent(done(1), t0)
 	if a.g.Holding() || lock.owner != nil {
 		t.Fatal("a's turn is over, the lock is free")
 	}
@@ -108,11 +109,11 @@ func TestOneHarnessDoesNotWaitOnItself(t *testing.T) {
 	if len(a.toAgent) != 2 {
 		t.Fatal("re-entrant: both prompts reach the agent")
 	}
-	a.g.FromAgent(done(1))
+	a.g.FromAgent(done(1), t0)
 	if !a.g.Holding() {
 		t.Fatal("still holding: prompt 2 is in flight")
 	}
-	a.g.FromAgent(done(2))
+	a.g.FromAgent(done(2), t0)
 	if a.g.Holding() {
 		t.Fatal("released once nothing is in flight")
 	}
@@ -144,7 +145,7 @@ func TestEverythingElsePassesThrough(t *testing.T) {
 		`{"jsonrpc":"2.0","id":"fs-1","method":"fs/read_text_file","params":{}}`,
 	}
 	for _, l := range up {
-		other.g.FromAgent([]byte(l))
+		other.g.FromAgent([]byte(l), t0)
 	}
 	if strings.Join(other.toClient, "\n") != strings.Join(up, "\n") || !other.g.Holding() {
 		t.Fatal("agent requests flow and do not end the turn")
@@ -164,7 +165,7 @@ func TestCancelAnswersAWaitingPrompt(t *testing.T) {
 	if len(b.toAgent) != 1 || !strings.Contains(b.toAgent[0], "session/cancel") {
 		t.Fatalf("the prompt never reaches the agent; the cancel does: %v", b.toAgent)
 	}
-	a.g.FromAgent(done(1))
+	a.g.FromAgent(done(1), t0)
 	b.g.Tick(t0.Add(time.Minute))
 	if len(b.toAgent) != 1 || b.g.Holding() {
 		t.Fatal("nothing left to run, so b does not take the lock")
@@ -216,7 +217,7 @@ func TestFailedTurnStillReleases(t *testing.T) {
 	lock := &sharedLock{}
 	a := newRig(lock)
 	a.g.FromClient(prompt(1, "s", "x"), t0)
-	a.g.FromAgent([]byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"boom"}}`))
+	a.g.FromAgent([]byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"boom"}}`), t0)
 	if a.g.Holding() || lock.owner != nil {
 		t.Fatal("an error response ends the turn too")
 	}
@@ -310,5 +311,284 @@ func TestPromptAnchorOnlyTrustsBuzzACPsOwnLines(t *testing.T) {
 	p, _ = json.Marshal(map[string]any{"prompt": []map[string]string{{"type": "text", "text": onlyQuoted}}})
 	if ch, rt := PromptAnchor(p); ch != "" || rt != "" {
 		t.Fatal("message content alone never anchors")
+	}
+}
+
+func update(kind string, background bool) []byte { return updateFor(kind, "t1", background) }
+
+// updateFor is an update about one tool call.
+func updateFor(kind, id string, background bool) []byte {
+	b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": "session/update", "params": map[string]any{
+		"sessionId": "s", "update": map[string]any{"sessionUpdate": kind, "toolCallId": id,
+			"rawInput": map[string]any{"command": "sleep 90", "run_in_background": background}}}})
+	return b
+}
+
+func logRig(r *rig) *[]string {
+	var logs []string
+	r.g.Logf = func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }
+	return &logs
+}
+
+func TestBackgroundWorkKeepsTheTurn(t *testing.T) {
+	lock := &sharedLock{}
+	a, b := newRig(lock), newRig(lock)
+	a.g.FromClient(prompt(1, "s", "run a long command"), t0)
+	a.g.FromAgent(update("tool_call", true), t0.Add(time.Second))
+	a.g.FromAgent(done(1), t0.Add(2*time.Second))
+	if !a.g.Holding() || !a.g.Background() {
+		t.Fatal("a prompt that left background work running keeps the turn")
+	}
+	b.g.FromClient(prompt(9, "s-b", "x"), t0.Add(3*time.Second))
+	b.g.Tick(t0.Add(40 * time.Second))
+	if len(b.toAgent) != 0 {
+		t.Fatal("b waits while a's background work runs")
+	}
+	// Trailing updates about the backgrounded call itself are its launch,
+	// not the agent waking: they must not start the quiet countdown.
+	a.g.FromAgent(updateFor("tool_call_update", "t1", false), t0.Add(3*time.Second))
+	a.g.Tick(t0.Add(60 * time.Second))
+	if !a.g.Holding() {
+		t.Fatal("the backgrounded call's own updates are not the agent waking")
+	}
+	// The background task ends; Claude Code wakes the agent to carry on.
+	a.g.FromAgent(updateFor("tool_call", "t2", false), t0.Add(90*time.Second))
+	a.g.Tick(t0.Add(100 * time.Second))
+	if !a.g.Holding() {
+		t.Fatal("still working: not quiet for long enough yet")
+	}
+	a.g.Tick(t0.Add(121 * time.Second))
+	if a.g.Holding() {
+		t.Fatal("quiet for 30s after waking: released")
+	}
+	b.g.Tick(t0.Add(122 * time.Second))
+	if len(b.toAgent) != 1 {
+		t.Fatal("b goes once a's background work is done")
+	}
+}
+
+func TestBackgroundHoldIsCapped(t *testing.T) {
+	lock := &sharedLock{}
+	a := newRig(lock)
+	logs := logRig(a)
+	a.g.FromClient(prompt(1, "s", "start a server"), t0)
+	a.g.FromAgent(update("tool_call", true), t0)
+	a.g.FromAgent(done(1), t0.Add(time.Second))
+	a.g.Tick(t0.Add(29 * time.Minute))
+	if !a.g.Holding() {
+		t.Fatal("within the cap")
+	}
+	a.g.Tick(t0.Add(31 * time.Minute))
+	if a.g.Holding() || !strings.Contains(strings.Join(*logs, "\n"), "released anyway") {
+		t.Fatalf("a background job that never ends must not hold the turn forever: %v", *logs)
+	}
+}
+
+func TestSelfStartedWorkTakesAFreeTurn(t *testing.T) {
+	lock := &sharedLock{}
+	a, b := newRig(lock), newRig(lock)
+	// Housekeeping is not work.
+	a.g.FromAgent(update("usage_update", false), t0)
+	a.g.FromAgent(update("available_commands_update", false), t0)
+	if a.g.Holding() {
+		t.Fatal("usage and command lists are not the agent working")
+	}
+	a.g.FromAgent(update("agent_message_chunk", false), t0)
+	if !a.g.Holding() || !a.g.Background() {
+		t.Fatal("the agent working outside a prompt takes the free turn")
+	}
+	b.g.FromClient(prompt(5, "s-b", "x"), t0.Add(time.Second))
+	if len(b.toAgent) != 0 {
+		t.Fatal("b waits")
+	}
+	a.g.Tick(t0.Add(31 * time.Second))
+	b.g.Tick(t0.Add(32 * time.Second))
+	if a.g.Holding() || len(b.toAgent) != 1 {
+		t.Fatal("quiet: released, and b goes")
+	}
+}
+
+func TestOverlapIsWarnedOnce(t *testing.T) {
+	lock := &sharedLock{}
+	a, b := newRig(lock), newRig(lock)
+	logs := logRig(b)
+	a.g.FromClient(prompt(1, "s", "busy"), t0)
+	b.g.FromAgent(update("agent_message_chunk", false), t0.Add(time.Second))
+	b.g.FromAgent(update("tool_call", false), t0.Add(2*time.Second))
+	n := strings.Count(strings.Join(*logs, "\n"), "WARNING")
+	if n != 1 || b.g.Holding() {
+		t.Fatalf("one warning per burst, and b cannot take a held turn: %d %v", n, *logs)
+	}
+	// A later burst warns again.
+	b.g.Tick(t0.Add(40 * time.Second))
+	b.g.FromAgent(update("tool_call", false), t0.Add(41*time.Second))
+	if strings.Count(strings.Join(*logs, "\n"), "WARNING") != 2 {
+		t.Fatal("a new burst is warned about too")
+	}
+}
+
+func TestOrdinaryTurnReleasesAtOnce(t *testing.T) {
+	lock := &sharedLock{}
+	a := newRig(lock)
+	a.g.FromClient(prompt(1, "s", "x"), t0)
+	a.g.FromAgent(update("tool_call", false), t0)
+	a.g.FromAgent(done(1), t0.Add(time.Second))
+	if a.g.Holding() {
+		t.Fatal("a turn with no background work ends with its prompt")
+	}
+}
+
+// The reviewer's starvation case: after one background task, A's own
+// community keeps prompting. B, waiting since a second after A's prompt
+// ended, must get the turn once A's hold ends — never be failed at MaxWait.
+func TestBackgroundHoldCannotStarveAnotherCommunity(t *testing.T) {
+	lock := &sharedLock{}
+	a, b := newRig(lock), newRig(lock)
+	bWaiting := false
+	var bSince time.Time
+	a.g.Yield = func(since time.Time) bool {
+		return bWaiting && OlderWaiter(since, []Waiter{{Since: bSince.Unix(), Alive: true}})
+	}
+	a.g.FromClient(prompt(1, "s", "start background work"), t0)
+	a.g.FromAgent(updateFor("tool_call", "bg", true), t0)
+	a.g.FromAgent(done(1), t0.Add(time.Second))
+
+	bSince, bWaiting = t0.Add(2*time.Second), true
+	b.g.FromClient(prompt(50, "s-b", "b's question"), bSince)
+
+	id := 2
+	bStarted := time.Time{}
+	aRanWhileBWaited := 0
+	for now := t0.Add(time.Minute); now.Before(t0.Add(18 * time.Hour)); now = now.Add(time.Minute) {
+		if int(now.Sub(t0).Minutes())%10 == 0 {
+			a.g.FromClient(prompt(id, "s", "a plain prompt"), now)
+			id++
+		}
+		a.g.Tick(now)
+		if bWaiting && len(a.g.inflight) > 0 {
+			aRanWhileBWaited++
+		}
+		// Answer any prompt a actually forwarded, as a quick turn.
+		for k := range a.g.inflight {
+			a.g.FromAgent([]byte(`{"jsonrpc":"2.0","id":`+k+`,"result":{"stopReason":"end_turn"}}`), now)
+		}
+		b.g.Tick(now)
+		if len(b.toAgent) > 0 && bStarted.IsZero() {
+			bStarted = now
+			bWaiting = false
+			b.g.FromAgent(done(50), now)
+		}
+	}
+	if bStarted.IsZero() {
+		t.Fatal("B never got the turn: one community held it for good")
+	}
+	if aRanWhileBWaited != 0 {
+		t.Fatalf("A's own later prompts ran %d time(s) while B, waiting longer, did not", aRanWhileBWaited)
+	}
+	if bStarted.Sub(t0) > BackgroundCap+time.Minute {
+		t.Fatalf("B waited %s; the hold must end within the cap from when it began", bStarted.Sub(t0))
+	}
+	for _, l := range b.toClient {
+		if strings.Contains(l, `"error"`) {
+			t.Fatal("B's prompt must not be failed at MaxWait")
+		}
+	}
+}
+
+func TestOwnPromptRunsInsideAHoldWhenNobodyWaits(t *testing.T) {
+	lock := &sharedLock{}
+	a := newRig(lock)
+	a.g.FromClient(prompt(1, "s", "x"), t0)
+	a.g.FromAgent(updateFor("tool_call", "bg", true), t0)
+	a.g.FromAgent(done(1), t0.Add(time.Second))
+	a.g.FromClient(prompt(2, "s", "follow-up"), t0.Add(time.Minute))
+	if len(a.toAgent) != 2 {
+		t.Fatal("with nobody else waiting, the community's next prompt need not wait for the background work")
+	}
+	a.g.FromAgent(done(2), t0.Add(2*time.Minute))
+	if !a.g.Holding() || !a.g.Background() {
+		t.Fatal("the hold goes on after that prompt")
+	}
+	a.g.Tick(t0.Add(BackgroundCap + time.Second))
+	if a.g.Holding() {
+		t.Fatal("and is still capped from when it began, not from the later prompt")
+	}
+}
+
+func TestSelfStartedWorkIsCappedAndOutlastsAPrompt(t *testing.T) {
+	lock := &sharedLock{}
+	a, b := newRig(lock), newRig(lock)
+	bWaiting := false
+	a.g.Yield = func(time.Time) bool { return bWaiting }
+	a.g.FromAgent(update("agent_message_chunk", false), t0)
+	if !a.g.Holding() {
+		t.Fatal("self-started work takes the free turn")
+	}
+	// A prompt arrives and ends while the agent is still busy on its own.
+	a.g.FromClient(prompt(1, "s", "x"), t0.Add(time.Second))
+	a.g.FromAgent(done(1), t0.Add(2*time.Second))
+	if !a.g.Holding() {
+		t.Fatal("a prompt ending inside self-started work does not end that work's hold")
+	}
+	// B asks; steady output keeps A from going quiet, but the cap still
+	// ends A's hold, and A's next output does not snatch the turn back
+	// from B, which has been waiting.
+	b.g.FromClient(prompt(9, "s-b", "x"), t0.Add(3*time.Second))
+	bWaiting = true
+	for m := 1; m <= 32; m++ {
+		now := t0.Add(time.Duration(m) * time.Minute)
+		a.g.Tick(now)
+		// A's output arrives before B polls again: it must not take the
+		// turn B has been waiting for.
+		a.g.FromAgent(update("agent_message_chunk", false), now)
+		b.g.Tick(now)
+	}
+	if a.g.Holding() || len(b.toAgent) != 1 {
+		t.Fatal("an agent driving itself in a loop must not hold the turn past the cap, and B goes")
+	}
+}
+
+func TestAHoldLeavesNothingBehind(t *testing.T) {
+	lock := &sharedLock{}
+	a := newRig(lock)
+	a.g.FromClient(prompt(1, "s", "x"), t0)
+	a.g.FromAgent(updateFor("tool_call", "bg", true), t0)
+	a.g.FromAgent(done(1), t0.Add(time.Second))
+	a.g.Tick(t0.Add(BackgroundCap + time.Second))
+	if a.g.Holding() {
+		t.Fatal("capped")
+	}
+	// A later, ordinary turn must end with its prompt, not inherit the old
+	// hold's background calls.
+	a.g.FromClient(prompt(2, "s", "y"), t0.Add(BackgroundCap+time.Minute))
+	a.g.FromAgent(done(2), t0.Add(BackgroundCap+2*time.Minute))
+	if a.g.Holding() {
+		t.Fatal("background state leaked into the next turn")
+	}
+}
+
+// The cap ends a hold, but never under a prompt that is still running: the
+// lock stays until that prompt answers.
+func TestCapNeverReleasesUnderARunningPrompt(t *testing.T) {
+	lock := &sharedLock{}
+	a, b := newRig(lock), newRig(lock)
+	a.g.FromClient(prompt(1, "s", "start background work"), t0)
+	a.g.FromAgent(updateFor("tool_call", "bg", true), t0)
+	a.g.FromAgent(done(1), t0.Add(time.Second))
+	// Nobody waiting: A's next prompt runs inside the hold.
+	a.g.FromClient(prompt(2, "s", "a long one"), t0.Add(29*time.Minute))
+	b.g.FromClient(prompt(9, "s-b", "x"), t0.Add(29*time.Minute+30*time.Second))
+	a.g.Tick(t0.Add(30*time.Minute + 2*time.Second)) // the hold began at t0+1s
+	b.g.Tick(t0.Add(30*time.Minute + 2*time.Second))
+	if !a.g.Holding() || len(b.toAgent) != 0 {
+		t.Fatal("at the cap, A's prompt 2 is still running: B must not start on top of it")
+	}
+	if a.g.Background() {
+		t.Fatal("the hold itself has ended")
+	}
+	a.g.FromAgent(done(2), t0.Add(31*time.Minute))
+	b.g.Tick(t0.Add(31 * time.Minute))
+	if a.g.Holding() || len(b.toAgent) != 1 {
+		t.Fatal("once prompt 2 answers, the turn is released, as for any prompt, and B goes")
 	}
 }

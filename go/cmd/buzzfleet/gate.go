@@ -181,18 +181,20 @@ func runGate() {
 	// would each wait for the other to read, for good.
 	toAgentQ := newLineWriter(toChild, func() { _ = toChild.Close() })
 	toClientQ := newLineWriter(os.Stdout, nil)
-	g := &fleet.Gate{
+	var g *fleet.Gate
+	g = &fleet.Gate{
 		Lock:     lock,
 		ToAgent:  toAgentQ.Send,
 		ToClient: toClientQ.Send,
 		MaxWait:  maxTurnWait(),
+		Logf:     gateLog,
 		Queued:   func(p fleet.Pending) { go postQueued(p) },
 		Yield: func(since time.Time) bool {
 			return fleet.OlderWaiter(since, host.OtherWaiters(os.Getenv(envGateLock), waitPath))
 		},
 		Changed: func(holding bool, waiting []fleet.Pending) {
 			if holding {
-				_ = lock.RecordHolder(fleet.Holder{Harness: instance, PID: os.Getpid(), Since: time.Now().Unix()})
+				_ = lock.RecordHolder(fleet.Holder{Harness: instance, PID: os.Getpid(), Since: time.Now().Unix(), Background: g.Background()})
 			}
 			since := int64(0)
 			if !holding && len(waiting) > 0 {
@@ -221,7 +223,7 @@ func runGate() {
 				clientLines = nil // the agent is gone; nothing left to gate
 				continue
 			}
-			g.FromAgent(line)
+			g.FromAgent(line, time.Now())
 		case now := <-tick.C:
 			g.Tick(now)
 		}

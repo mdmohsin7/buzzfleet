@@ -241,6 +241,13 @@ func cmdRunAgent(h *host.Host, args []string) {
 			die("%s: turn gate: %v", instance, err)
 		}
 		env = setEnv(genv, "BUZZ_ACP_AGENT_COMMAND", gated)
+		// Claude Code otherwise runs long commands in the background, ends
+		// the prompt, and later carries on by itself, outside any turn the
+		// gate can see. Turning that off keeps its work inside the prompt;
+		// the gate's own handling of background work is the backstop.
+		if os.Getenv("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS") == "" {
+			env = setEnv(env, "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1")
+		}
 	}
 	// Containers are made by dockerd, outside this unit's cgroup, so they are
 	// capped on the way in instead: the supervisor serves this socket.

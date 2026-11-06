@@ -257,6 +257,15 @@ default). While a prompt waits, other messages for its session still reach the
 coding agent; buzz-acp drives one coding-agent process at a time, so nothing
 depends on that order today.
 
+Claude Code can run a long command in the background, end its turn, and carry
+on by itself when the command finishes, with no new prompt. For a harness
+behind the gate, buzzfleet sets `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` so its
+work stays inside the turn. As a backstop, a turn that still starts
+background work keeps the agent's turn after its prompt ends, until the work
+it does on waking has gone quiet (capped at 30 minutes); work the agent starts
+on its own takes the turn if it is free, and is logged as an overlap if it is
+not.
+
 This is done by a small gate between buzz-acp and the coding agent, installed
 under the coding agent's own name so buzz-acp treats it exactly as before. It
 passes everything through except that a prompt waits for the agent's turn

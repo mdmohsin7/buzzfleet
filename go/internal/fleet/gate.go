@@ -354,10 +354,17 @@ func (g *Gate) Tick(now time.Time) {
 	idle := len(g.inflight) == 0
 	switch {
 	case (g.afterglow || g.autonomous) && now.Sub(g.holdStart) >= BackgroundCap:
-		// Checked first and regardless of prompts: the cap is what makes
-		// sure no hold keeps the other communities off for good.
-		g.inflight = nil
-		g.release(fmt.Sprintf("work outside a prompt still going after %s; turn released anyway, so other communities are not held off", BackgroundCap))
+		// The cap ends the hold, so no hold keeps the other communities off
+		// for good. A prompt of ours still running is a turn like any other,
+		// though: the lock stays until it answers, and only the hold ends.
+		if idle {
+			g.release(fmt.Sprintf("work outside a prompt still going after %s; turn released anyway, so other communities are not held off", BackgroundCap))
+		} else {
+			g.afterglow, g.autonomous, g.woke = false, false, false
+			g.bgCalls = nil
+			g.logf("work outside a prompt still going after %s; the turn goes when the prompt in progress ends", BackgroundCap)
+			g.changed()
+		}
 	case g.afterglow && idle && g.woke && now.Sub(g.lastActive) >= QuietAfter:
 		g.release("the background work and what the agent did after it are finished; turn released")
 	case g.autonomous && idle && now.Sub(g.lastActive) >= QuietAfter:

@@ -566,3 +566,29 @@ func TestAHoldLeavesNothingBehind(t *testing.T) {
 		t.Fatal("background state leaked into the next turn")
 	}
 }
+
+// The cap ends a hold, but never under a prompt that is still running: the
+// lock stays until that prompt answers.
+func TestCapNeverReleasesUnderARunningPrompt(t *testing.T) {
+	lock := &sharedLock{}
+	a, b := newRig(lock), newRig(lock)
+	a.g.FromClient(prompt(1, "s", "start background work"), t0)
+	a.g.FromAgent(updateFor("tool_call", "bg", true), t0)
+	a.g.FromAgent(done(1), t0.Add(time.Second))
+	// Nobody waiting: A's next prompt runs inside the hold.
+	a.g.FromClient(prompt(2, "s", "a long one"), t0.Add(29*time.Minute))
+	b.g.FromClient(prompt(9, "s-b", "x"), t0.Add(29*time.Minute+30*time.Second))
+	a.g.Tick(t0.Add(30*time.Minute + 2*time.Second)) // the hold began at t0+1s
+	b.g.Tick(t0.Add(30*time.Minute + 2*time.Second))
+	if !a.g.Holding() || len(b.toAgent) != 0 {
+		t.Fatal("at the cap, A's prompt 2 is still running: B must not start on top of it")
+	}
+	if a.g.Background() {
+		t.Fatal("the hold itself has ended")
+	}
+	a.g.FromAgent(done(2), t0.Add(31*time.Minute))
+	b.g.Tick(t0.Add(31 * time.Minute))
+	if a.g.Holding() || len(b.toAgent) != 1 {
+		t.Fatal("once prompt 2 answers, the turn is released, as for any prompt, and B goes")
+	}
+}

@@ -59,11 +59,25 @@ section below.
   - `InaccessiblePaths=` and `ReadOnlyPaths=` in a **user** unit are accepted
     and silently ignored, with or without `PrivateUsers=yes`. The file stayed
     readable and writable.
+  - The cause is in the kernel log: AppArmor's `unprivileged_userns` profile
+    denies `CAP_SYS_ADMIN` inside the user manager's namespace. systemd then
+    skips the mount namespace without a word.
+  - That makes **every** namespacing option in user units (`ProtectProc=`,
+    `ProtectHome=`, and so on) a silent no-op on such hosts.
   - The same properties on a **system** unit with `User=` are enforced (tested).
 - **Same uid means no secrets.** Any process running as the agent's Linux user
   can read `/proc/<pid>/environ` of every other process of that user. That
-  includes every agent's `BUZZ_PRIVATE_KEY`. `ProtectProc=invisible` needs
-  systemd ≥ 247, and the 20.04-era hosts this runs on have 245.
+  includes every agent's `BUZZ_PRIVATE_KEY`.
+  - Yama `ptrace_scope=1` does not stop it: reading `environ` only needs
+    `PTRACE_MODE_READ`, and Yama gates attach.
+  - `ProtectProc=` cannot help either. It needs systemd ≥ 247, which the
+    20.04-era hosts lack. On newer hosts it is dead in user units for the reason
+    above.
+- **Git credentials are per relay.** buzz-acp gives each harness an ephemeral
+  git identity through `GIT_CONFIG_*` environment variables, scoped to its own
+  relay's git endpoint. Nothing is written to repository config, so sharing a
+  workdir is safe. But a repo whose remote is on community A's relay cannot be
+  pushed from community B's harness: B holds no credential for A's relay.
 
 ## 1. Data model
 
@@ -105,9 +119,15 @@ binaries.
 - **Invites are not stored.** They are single-use secrets. `joinedAt` records
   that the claim succeeded. Channels are not stored either; they are queried
   live, as today.
+- **One entry per relay.** Relays are compared in canonical form, and a second
+  community entry on a relay already used is refused at config time. Two
+  harnesses on one key and one relay double-reply, so this is caught before
+  `doctor` ever has to.
 - **Migration** needs no rewrite. An `agent.json` with no `communities` is an
   agent in `main` only, as today. The file is only rewritten by
   `community add`/`rm`, and that rewrite keeps the top-level fields byte-for-byte.
+  That needs a key-order-preserving JSON round-trip, which Go's map marshalling
+  does not give. It is built and tested as such.
 - **Rollback:**
   - An older binary ignores `communities` and keeps running the primary harness.
   - It cannot see the extra harnesses, so rolling back is
@@ -148,6 +168,13 @@ binaries.
 - **Health and presence** are per harness. Presence is read from each
   community's relay as the agent itself (the agent is a member there, and the
   supervisor may not be). The heal and give-up logic is keyed by harness.
+- **A harness waiting on the turn gate is never healed.** The gate records the
+  current holder (harness and prompt start time) in the lock file. `status` and
+  `health` show `waiting on agent-a@main since 14:02`. A long or wedged turn is
+  the holder's problem, so restarting the waiter would fix nothing.
+- **Supervisor notices** about a non-primary harness name it by its local name
+  (`agent-a@b`). They never include B's relay URL, members or channels, because
+  they are posted in the primary community.
 - **Duplicate detection is keyed by (pubkey, canonical relay),** read from each
   `buzz-acp` process's environment, not by pubkey alone. Two harnesses on one
   key in different communities are correct. Two on one key in the *same*
@@ -165,18 +192,33 @@ enforced by a gate between buzz-acp and the coding agent.**
 `run-agent` sets the agent command to `buzzfleet acp-gate --agent <agent> --
 <real command>`. The gate passes ACP JSON-RPC through unchanged, except:
 
-- When it sees a `session/prompt` request, it takes an exclusive `flock` on
-  `$XDG_RUNTIME_DIR/buzzfleet/turn-<agent>.lock` before forwarding. It releases
-  the lock when the matching response comes back and no other prompt from this
-  harness is still in flight.
+- When it sees a `session/prompt` request, it takes an exclusive `flock` on the
+  agent's turn lock before forwarding. It releases the lock when the matching
+  response comes back and no other prompt from this harness is still in flight.
+- **Where the lock lives:** `<FLEET_HOME>/run/turn-<agent>.lock`, in a directory
+  owned by a per-agent group (mode 2770). Every harness of the agent can open it,
+  including a restricted one running as another Linux user, which gets it bound
+  into its namespace. A lock under `$XDG_RUNTIME_DIR` (mode 0700) would silently
+  leave restricted turns unserialised.
+- **The holder is recorded in the lock file:** which harness, and when its
+  prompt started. Waiters and `status` read it.
+- **While a prompt holds the lock,** every agent→client request passes through
+  untouched: `fs/*`, `session/request_permission`, terminal. So do all
+  notifications.
 - Within one harness it is re-entrant, so buzz-acp's own steering or queueing
   cannot deadlock against itself.
-- A `session/cancel` for a prompt still waiting for the lock is answered at once
-  with a cancelled stop reason. Nothing is sent to the coding agent.
+- `session/cancel` is a notification, so the gate cannot answer it. For a prompt
+  still waiting for the lock, the gate instead replies to that pending
+  `session/prompt` with `stopReason: cancelled`, and nothing reaches the coding
+  agent.
 - If the harness or the coding agent dies, the kernel drops the flock. A crash
   cannot wedge the other community.
-- The wait is bounded (`turnWaitMins`, default 30). If it runs out, the prompt
-  fails with an error naming the reason. buzz-acp's own turn limit is 2 h.
+- **The queued message:** after about 60 s of waiting, the gate sends one short
+  `agent_message_chunk` for the waiting prompt: "Busy with another task — this
+  is queued and I'll get to it." It says the agent is busy, not where.
+- **The wait limit is the turn limit,** 2 h by default, because waiting behind
+  legitimate work is normal, not an error. Only if the wait outlives the turn
+  limit does the prompt fail with an error naming the cause.
 
 **Why this one:**
 
@@ -202,8 +244,16 @@ harness still shows typing and liveness while it waits. Whether that is
 acceptable, or whether some communities should be able to preempt others, is an
 open question (section 10).
 
-**Not gated:** background processes a turn leaves running after it ends. They
-are the agent's own, as today.
+**Not gated:**
+
+- Background processes a turn leaves running after it ends. They are the
+  agent's own, as today.
+- Each harness's idle coding-agent process writing its own config and history
+  files (Claude Code's `~/.claude.json`) outside a turn. Agents sharing a config
+  dir already do this today, so it is not new.
+
+**Also gated:** the supervisor's periodic memory sync takes the same lock, so it
+never runs during any of the agent's turns.
 
 ## 4. Sharing knowledge
 
@@ -228,11 +278,14 @@ are the agent's own, as today.
 - **Direction:** one-way (`--from` → `--to`) by default. `--both` is
   bidirectional.
 - **Conflicts:** last-writer-wins would silently drop one side's edit when a slug
-  changed on both sides since the last sync. Sync keeps a local record of the
+  changed on both sides since the last sync. On the **first** sync of a pair,
+  there is no record yet. A slug present on both sides with different heads is
+  then a conflict too, not last-writer-wins. Sync keeps a local record of the
   last event id it saw per slug and per pair. If both sides moved past it, sync
   writes nothing for that slug. It reports a conflict and saves both values to
   `agents/<agent>/memory-conflicts/` until
-  `--resolve <slug>=from|to` is given.
+  `--resolve <slug>=from|to` is given. Those files and the per-pair record hold
+  decrypted memory, so they are created 0600 in a 0700 directory.
 - **`core` is excluded by default.** It holds the agent's identity and rules,
   and those can rightly differ per community.
 - **Different owners:** a verbatim copy is impossible. Copying needs
@@ -260,6 +313,10 @@ are the agent's own, as today.
   community, because the agent is a member there. Making it truly read-only
   would take a key that is not a member of the other community, which defeats
   "same identity". The prompt says to use `peek` and never post across.
+- **Git across communities:** a repo whose remote lives on A's relay can be
+  read from B's harness, because it is the same workdir. It cannot be pushed
+  from there: B's harness only holds a git credential for B's relay. Pushes to
+  A's repos belong to A's harness.
 
 ### (c) A shared notes file
 
@@ -283,9 +340,28 @@ Everything the agent can see in its primary community, it can see and repeat in
 the other one. The only controls are the system-prompt addendum ("do not bring
 X into community Y") and what the operator chooses to keep out of the workdir.
 These are **advisory**, and this mode is for communities trusted with all of the
-agent's data.
+agent's data. That includes A's **raw message history**, not just distilled
+knowledge: both harnesses run on the same path, so their coding-agent
+transcripts land in the same project directory. An agent can search its own
+transcripts and quote A's messages verbatim in B.
 
-**`restricted`.** Enforced, by layers. All three are needed: the first two
+**`restricted`.** It restricts **host files only, not community A's data on its
+relay.** The harness must hold the agent's private key, because it is the same
+identity, and it has outbound network. So it can connect to A's relay as the
+agent and read everything the agent can read there:
+
+- A's channels and message history;
+- the agent's Buzz memory for every owner.
+
+What `restricted` protects is the workdir, the coding agent's local memory and
+transcripts, other agents' keys and the host. Locking the harness to B's relay
+and the model API with `IPAddressAllow=`/`IPAddressDeny=` would close the relay
+path. It is not proposed, because those addresses move behind CDNs and the rules
+would break silently. If A's relay data must be kept from B, the only sound
+answer is a **separate identity** for B: a different agent, sharing selected
+files.
+
+The host-file part is enforced by layers. All three are needed: the first two
 alone leave the other agents' keys readable through `/proc`.
 
 1. **A separate Linux user** per restricted harness, `buzz-<agent>-<community>`.
@@ -434,7 +510,9 @@ In outline:
 1. **How much may the second community see?** Everything (`full`), or an
    allowlist (`restricted`)? `restricted` is several times the work: separate
    users, system units, ACLs, the probe. So it is proposed as a later phase,
-   built only if needed.
+   built only if needed. Even then, it keeps host files private but not the
+   first community's relay data (section 5). Keeping that private takes a
+   separate agent identity.
 2. **Who owns the agent in the second community?** The same owner pubkey or a
    different person? That decides who it answers under `owner-only`, and
    whether Buzz memory can be shared verbatim (section 4a).

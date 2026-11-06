@@ -247,8 +247,8 @@ func TestCheckCommunityOnlyConcernsItsOwn(t *testing.T) {
 func TestTopLevelSpanRefusals(t *testing.T) {
 	for doc, want := range map[string]string{
 		`{"communities": {}, "communities": {}}`: "more than once",
-		`{"COMMUNITIES": {}}`:                   "reads as",
-		"{\"a\": 1}\n{\"b\": 2}":                "after its closing brace",
+		`{"COMMUNITIES": {}}`:                    "reads as",
+		"{\"a\": 1}\n{\"b\": 2}":                 "after its closing brace",
 	} {
 		_, _, _, _, err := topLevelSpan([]byte(doc), "communities")
 		if err == nil || !strings.Contains(err.Error(), want) {

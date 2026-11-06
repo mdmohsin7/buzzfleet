@@ -100,7 +100,6 @@ binaries.
       "respondTo": "owner-only",
       "access": "full",
       "allow": [],
-      "historyFrom": ["main"],
       "joinedAt": 1767225600
     }
   }
@@ -115,7 +114,8 @@ binaries.
     `--agent-owner` and owner-only replies follow it.
   - `access`: `full` or `restricted` (see section 5).
   - `allow`: the restricted allowlist.
-  - `historyFrom`: which other communities this harness may read history from.
+  - Every other community of the agent is readable through `peek` (section
+    4b). Limiting that per community belongs with `restricted` access.
 - **Invites are not stored.** They are single-use secrets. `joinedAt` records
   that the claim succeeded. Channels are not stored either; they are queried
   live, as today.
@@ -299,15 +299,24 @@ never runs during any of the agent's turns.
 ### (b) Reading the other community's history
 
 - **How the agent learns about the other communities:**
-  - The env var `BUZZ_FLEET_COMMUNITIES`: JSON with each community's name, its
-    relay and whether this harness may read it.
-  - A short generated addendum appended to the system prompt, naming the
-    communities and the tool below.
+  - The env var `BUZZ_FLEET_COMMUNITIES`: JSON with each community's local name,
+    marking the one this harness answers in. No relay addresses.
+  - A generated section in the system prompt, naming the communities and the
+    tool below.
 - **The tool:** `buzzfleet peek <community> <buzz subcommand...>`. It sets that
   community's relay and allows only read subcommands: `messages
-  search|get|thread`, `channels list|get`, `feed get`, `users get` and
-  `mem ls|get`. Anything else is refused. `historyFrom` decides which
-  communities each harness may peek into.
+  get|thread|search`, `channels list|get|search|members`, `feed get`, `users
+  get|presence` and `mem ls|get|hash`. Anything else is refused, as are the
+  flags that change the relay or identity. Every other community of the agent
+  can be read; limiting that belongs with `restricted` access.
+- **Peek's environment is an allowlist,** not the harness's own. The buzz CLI
+  sends `BUZZ_AUTH_TAG` with every request, so the harness's environment would
+  hand one community's owner attestation to another's relay. It always reads
+  with the agent's own key, never a key the caller has exported.
+- **Auth tags are per community.** An owner attestation (`BUZZ_AUTH_TAG`) must
+  never sit in the per-agent `identity.env`, because every community's harness
+  would then present the main community's. If attestations are ever used, they
+  belong in each community's own settings.
 - **Honest limit:** this is advisory. The harness has the agent's key and the
   `buzz` CLI. It could set `BUZZ_RELAY_URL` itself and post into the other
   community, because the agent is a member there. Making it truly read-only
@@ -426,7 +435,7 @@ say. A restricted harness can still repeat anything in its `allow` list.
 ```
 buzzfleet community add <agent> <name> --invite <code> [--relay <url>]
           --access full|restricted [--allow <path>[:rw]]...
-          [--owner <hex>] [--respond-to owner-only|...] [--history-from main,...]
+          [--owner <hex>] [--respond-to owner-only|...]
 buzzfleet community rm <agent> <name> [--leave]
 buzzfleet community ls [<agent>]
 buzzfleet memory sync <agent> --from <c> --to <c> [--both] [--exclude <glob>]...

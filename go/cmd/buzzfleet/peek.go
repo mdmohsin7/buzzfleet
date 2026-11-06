@@ -16,9 +16,9 @@ import (
 // communities, as the agent. Run from inside a harness it knows which agent it
 // is; an operator passes --agent.
 func cmdPeek(h *host.Host, args []string) {
-	agent := ""
+	agent, operator := "", false
 	if len(args) >= 2 && args[0] == "--agent" {
-		agent, args = args[1], args[2:]
+		agent, args, operator = args[1], args[2:], true
 	}
 	self := fleet.ParseInstance(os.Getenv("BUZZ_FLEET_HARNESS"))
 	if agent == "" {
@@ -46,21 +46,15 @@ func cmdPeek(h *host.Host, args []string) {
 		}
 		die("%s is not in a community called %q (it is in: %s)", agent, community, strings.Join(names, ", "))
 	}
-	secret := os.Getenv("BUZZ_PRIVATE_KEY")
-	if secret == "" {
-		secret = h.AgentSecret(agent)
-	}
-	if secret == "" {
-		die("no identity for %s", agent)
+	secret, err := peekSecret(h, agent, operator, os.Getenv("BUZZ_PRIVATE_KEY"))
+	if err != nil {
+		die("%v", err)
 	}
 	cmd := exec.Command(filepath.Join(h.BuzzBin, "buzz"), rest...)
 	if _, err := os.Stat(cmd.Path); err != nil {
 		cmd = exec.Command("buzz", rest...)
 	}
-	env := os.Environ()
-	env = setEnv(env, "BUZZ_RELAY_URL", host.HTTPRelay(m.Relay))
-	env = setEnv(env, "BUZZ_PRIVATE_KEY", secret)
-	cmd.Env = env
+	cmd.Env = peekEnv(os.Environ(), host.HTTPRelay(m.Relay), secret)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
@@ -68,6 +62,41 @@ func cmdPeek(h *host.Host, args []string) {
 		}
 		die("%v", err)
 	}
+}
+
+// peekSecret picks the key peek reads with: the agent's, and nobody else's.
+// An operator's shell may well have the owner's key exported, so --agent
+// always takes the agent's own; inside a harness, the key in the environment
+// must be the agent's.
+func peekSecret(h *host.Host, agent string, operator bool, envKey string) (string, error) {
+	secret := h.AgentSecret(agent)
+	if !operator && envKey != "" {
+		got, err := derivePubkey(envKey)
+		want := h.AgentPubkey(agent, derivePubkey)
+		if err != nil || want == "" || got != want {
+			return "", fmt.Errorf("the key in this environment is not %s's; peek reads only as the agent", agent)
+		}
+		secret = envKey
+	}
+	if secret == "" {
+		return "", fmt.Errorf("no identity for %s", agent)
+	}
+	return secret, nil
+}
+
+// peekEnv is the whole environment the buzz CLI gets for a peek, built from
+// an allowlist rather than the harness's own. The buzz CLI sends BUZZ_AUTH_TAG
+// with every request, reads included, so passing the harness environment on
+// would hand this community's owner attestation to another community's relay.
+func peekEnv(from []string, relay, secret string) []string {
+	keep := map[string]bool{"PATH": true, "HOME": true, "TMPDIR": true, "LANG": true, "BUZZ_OUTPUT_FORMAT": true}
+	var env []string
+	for _, kv := range from {
+		if k, _, ok := strings.Cut(kv, "="); ok && keep[k] {
+			env = append(env, kv)
+		}
+	}
+	return append(env, "BUZZ_RELAY_URL="+relay, "BUZZ_PRIVATE_KEY="+secret)
 }
 
 // ── what a harness is told about its communities ──────────────────────────────

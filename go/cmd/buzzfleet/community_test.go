@@ -234,3 +234,40 @@ func TestHarnessPromptForAMultiCommunityAgent(t *testing.T) {
 		t.Fatal("notes overwritten")
 	}
 }
+
+func TestPeekEnvCarriesOnlyWhatItNeeds(t *testing.T) {
+	from := []string{"PATH=/bin", "HOME=/h", "BUZZ_AUTH_TAG=[\"auth\",\"owner\",\"\",\"sig\"]",
+		"BUZZ_RELAY_URL=https://relay-b.example", "BUZZ_PRIVATE_KEY=harness-key", "BUZZ_FLEET_HARNESS=agent-a--b",
+		"BUZZ_OUTPUT_FORMAT=compact", "ANTHROPIC_API_KEY=x"}
+	env := strings.Join(peekEnv(from, "https://relay-a.example", "agent-key"), "\n")
+	for _, gone := range []string{"BUZZ_AUTH_TAG", "relay-b.example", "harness-key", "ANTHROPIC_API_KEY", "BUZZ_FLEET_HARNESS"} {
+		if strings.Contains(env, gone) {
+			t.Fatalf("%s must not reach the other community's relay:\n%s", gone, env)
+		}
+	}
+	for _, kept := range []string{"PATH=/bin", "HOME=/h", "BUZZ_OUTPUT_FORMAT=compact", "BUZZ_RELAY_URL=https://relay-a.example", "BUZZ_PRIVATE_KEY=agent-key"} {
+		if !strings.Contains(env, kept) {
+			t.Fatalf("missing %s:\n%s", kept, env)
+		}
+	}
+}
+
+func TestPeekReadsOnlyAsTheAgent(t *testing.T) {
+	h := fixtureHost(t)
+	agentKey := strings.Repeat("0", 63) + "1"
+	ownerKey := strings.Repeat("0", 63) + "2"
+	_ = os.WriteFile(filepath.Join(h.FleetHome, "agents", "agent-a", "identity.env"), []byte("BUZZ_PRIVATE_KEY="+agentKey+"\n"), 0o600)
+
+	if k, err := peekSecret(h, "agent-a", true, ownerKey); err != nil || k != agentKey {
+		t.Fatalf("operator mode must use the agent's key, not the caller's: %q %v", k, err)
+	}
+	if _, err := peekSecret(h, "agent-a", false, ownerKey); err == nil {
+		t.Fatal("inside a harness, a key that is not the agent's is refused")
+	}
+	if k, err := peekSecret(h, "agent-a", false, agentKey); err != nil || k != agentKey {
+		t.Fatalf("the agent's own key: %q %v", k, err)
+	}
+	if k, _ := peekSecret(h, "agent-a", false, ""); k != agentKey {
+		t.Fatal("no key in the environment: the agent's from its identity file")
+	}
+}

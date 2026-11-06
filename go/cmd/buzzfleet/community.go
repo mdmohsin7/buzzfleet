@@ -337,6 +337,13 @@ func cmdCommunityRm(h *host.Host, args []string) {
 	}
 	h.Systemctl("daemon-reload")
 	fmt.Printf("%s no longer runs in %q. It is still a member there; its messages there stay.\n", agent, name)
+	// Its other harnesses still list the old set of communities, and run
+	// behind the gate, until they restart.
+	if len(next) == 0 {
+		fmt.Printf("Restart %s when it is idle, so it runs as a single-community agent again: buzzfleet restart %s\n", agent, agent)
+	} else {
+		fmt.Printf("Restart its other harnesses when idle, so their prompts stop listing %q: buzzfleet restart %s\n", name, agent)
+	}
 }
 
 func cmdCommunityLs(h *host.Host, args []string) {
